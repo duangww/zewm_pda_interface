@@ -1,0 +1,64 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Public
+**************************************************************************
+
+  METHOD if_http_extension~handle_request.
+
+    DATA lv_str TYPE string.
+    DATA ls_log TYPE ztpda_jk_log.
+    DATA lv_cdata TYPE string.
+
+*    BREAK sapyh.
+    "读取http request 是否含有对应method 值，如有则继续，如没有则跳出
+    DATA(lv_action) = to_upper( server->request->get_form_field( c_action ) ).
+    IF sy-subrc NE 0 OR lv_action IS INITIAL.
+      server->response->set_cdata( data = 'Please put an action to the url and try again!' ).
+      RETURN.
+    ENDIF.
+
+    ls_log-action = lv_action.
+
+    TRY.
+        gv_request_id = ls_log-request_id = cl_system_uuid=>create_uuid_c32_static( ).
+      CATCH cx_uuid_error.
+    ENDTRY.
+
+    ls_log-request_data = server->request->get_cdata( ).
+    ls_log-create_date = sy-datum.
+    ls_log-create_time = sy-uzeit.
+    ls_log-create_user = sy-uname.
+
+    MODIFY ztpda_jk_log FROM ls_log.
+    COMMIT WORK.
+
+    "
+    TRY.
+        CALL METHOD me->(lv_action)
+          EXPORTING
+            io_request = server->request
+          IMPORTING
+            ev_json    = lv_str.
+
+      CATCH cx_sy_dyn_call_error INTO DATA(lo_exc).
+        lv_str = 'Connection error:' && lo_exc->get_text( ).
+    ENDTRY.
+
+
+    ls_log-response_data = lv_str.
+    ls_log-type = gs_msg-msg_type.
+    ls_log-message = gs_msg-msg_content.
+
+
+    server->response->set_cdata( data = lv_str ).
+    server->response->set_status( code = 200 reason = 'OK' ).
+
+    MODIFY ztpda_jk_log FROM ls_log.
+    COMMIT WORK AND WAIT.
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

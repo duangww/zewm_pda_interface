@@ -1,0 +1,241 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD stock_inquiry.
+
+    DATA:lt_data TYPE /scwm/tt_lime_quan_mon.
+    DATA:wa_data TYPE /scwm/s_lime_quan_mon.
+    DATA lt_data_mon TYPE /scwm/tt_lime_all_mon.
+
+    DATA:r_range TYPE TABLE OF rsdsselopt.
+    DATA:w_range TYPE rsdsselopt.
+    DATA:f_range TYPE TABLE OF rsds_frange.
+    DATA:wf_range TYPE rsds_frange.
+    DATA:lt_range TYPE TABLE OF rsds_range.
+    DATA:wa_range TYPE rsds_range.
+
+    DATA:BEGIN OF ls_in,
+           lgnum TYPE /scwm/lagp-lgnum,
+           lgpla TYPE /scwm/lagp-lgpla,
+           matnr TYPE mara-matnr,
+           werks TYPE marc-werks,
+         END OF ls_in.
+
+    TYPES:BEGIN OF ly_out,
+            lgpla    TYPE /scwm/lgpla,    "仓位
+            matnr    TYPE /scwm/de_matnr,    "产品编码
+            maktx    TYPE /scwm/de_ui_maktx,   "产品描述
+            quan     TYPE /scwm/de_ui_quan,       "数量
+            unit     TYPE /scwm/de_base_uom,       "单位
+            charg    TYPE /scwm/de_charg,    "批次
+            vfdat    TYPE /scwm/sled,     "货架寿命到期日期
+            cat_text TYPE /lime/cust_stock_cat_txt,
+            zjy_text TYPE zeyj_text,      "检验结果
+          END OF ly_out.
+    DATA:lt_out TYPE TABLE OF ly_out,
+         wa_out TYPE ly_out.
+
+    DATA: lt_range2 TYPE rsds_trange,   "add by Jeff 20260316
+          ls_range  TYPE rsds_range.
+
+
+**********************************************************************
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_in ).
+
+    TRANSLATE ls_in-lgpla TO UPPER CASE.
+
+*------------add by yakir at 16.11.2020 08:30:08------begin--*
+    TRANSLATE ls_in-lgnum TO UPPER CASE.
+    TRANSLATE ls_in-matnr TO UPPER CASE.
+    TRANSLATE ls_in-werks TO UPPER CASE.
+*------------add by yakir at 16.11.2020 08:30:08------end--*
+
+    SELECT SINGLE lgnum,lgpla,lgtyp,lgber FROM /scwm/lagp
+    WHERE lgnum = @ls_in-lgnum
+    AND lgpla = @ls_in-lgpla
+    INTO @DATA(lt_all).
+
+    IF sy-subrc EQ 0.""yakir 20201115
+      w_range-sign = 'I'.
+      w_range-option = 'EQ'.
+      w_range-low = lt_all-lgpla.
+      APPEND w_range TO r_range.
+
+      wf_range-fieldname = 'LGPLA'.
+      wf_range-selopt_t = r_range.
+      APPEND wf_range TO f_range.
+      CLEAR:w_range,wf_range.
+      REFRESH:r_range.
+
+
+      w_range-sign = 'I'.
+      w_range-option = 'EQ'.
+      w_range-low = lt_all-lgber.
+      APPEND w_range TO r_range.
+
+      wf_range-fieldname = 'LGBER'.
+      wf_range-selopt_t = r_range.
+      APPEND wf_range TO f_range.
+      CLEAR:w_range,wf_range.
+      REFRESH:r_range.
+
+
+      w_range-sign = 'I'.
+      w_range-option = 'EQ'.
+      w_range-low = lt_all-lgtyp.
+      APPEND w_range TO r_range.
+
+      wf_range-fieldname = 'LGTYP'.
+      wf_range-selopt_t = r_range.
+      APPEND wf_range TO f_range.
+      CLEAR:w_range,wf_range.
+      REFRESH:r_range.
+
+
+      wa_range-tablename = '/SCWM/LAGP'.
+      wa_range-frange_t = f_range.
+      APPEND wa_range TO lt_range.
+      CLEAR:wa_range.
+      REFRESH:f_range.
+
+    ENDIF.
+
+
+    IF lt_range IS NOT INITIAL.
+      CALL FUNCTION '/SCWM/STOCK_PER_BIN_MON'
+        EXPORTING
+          iv_lgnum     = ls_in-lgnum
+          iv_mode      = '2'
+        IMPORTING
+          et_data      = lt_data
+        CHANGING
+          ct_tab_range = lt_range.
+    ELSEIF ls_in-matnr IS NOT INITIAL.
+
+      ls_range-tablename = '/SCWM/AQUA'.
+      ls_range-frange_t = VALUE #(
+      ( fieldname = 'MATNR'
+        selopt_t =  VALUE #(
+      ( sign = 'I'  option = 'EQ' low = ls_in-matnr )
+      )
+      )
+      ).
+      APPEND ls_range TO lt_range2.
+      CLEAR: ls_range.
+*      CALL FUNCTION '/SCWM/STOCK_PHYSICAL_ONLY_MON'
+*        EXPORTING
+*          iv_lgnum = ls_in-lgnum
+*          iv_mode  = '2'
+*        IMPORTING
+*          et_data  = lt_data_mon.
+
+      CALL FUNCTION '/SCWM/STOCK_PHYSICAL_ONLY_MON'
+        EXPORTING
+          iv_lgnum     = ls_in-lgnum
+          iv_mode      = '2'
+        IMPORTING
+          et_data      = lt_data_mon
+        CHANGING
+          ct_tab_range = lt_range2.
+
+
+      MOVE-CORRESPONDING lt_data_mon TO lt_data.
+    ENDIF.
+
+
+*------------add by yakir at 15.11.2020 11:44:41------begin--*
+    SELECT lifnr,werks
+      FROM lfa1
+      INTO TABLE @DATA(lt_lfa1)
+      ORDER BY lifnr.
+*------------add by yakir at 15.11.2020 11:44:41------end--*
+
+    LOOP AT lt_data INTO wa_data.
+
+*------------add by yakir at 15.11.2020 11:48:03------begin--*
+      IF ls_in-werks IS NOT INITIAL.
+        READ TABLE lt_lfa1 INTO DATA(ls_lfa1)
+        WITH KEY lifnr = wa_data-entitled
+        BINARY SEARCH.
+        IF ls_lfa1-werks NE ls_in-werks.
+          DELETE lt_data.
+          CONTINUE.
+        ENDIF.
+
+      ENDIF.
+
+      IF ls_in-matnr IS NOT INITIAL
+        AND  wa_data-matnr NE ls_in-matnr.
+        DELETE lt_data.
+        CONTINUE.
+      ENDIF.
+
+*------------add by yakir at 15.11.2020 11:48:03------end--*
+
+      wa_out-lgpla = wa_data-lgpla.   "仓位
+      wa_out-matnr = wa_data-matnr.   "产品编码
+      wa_out-maktx = wa_data-maktx.   "产品描述
+      wa_out-quan = wa_data-quan.   "数量
+*      WA_OUT-UNIT = WA_DATA-UNIT.   "单位
+      wa_out-charg = wa_data-charg.   "批次
+
+      ""单位转换
+      CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+        EXPORTING
+          input          = wa_data-unit
+        IMPORTING
+          output         = wa_out-unit
+        EXCEPTIONS
+          unit_not_found = 1
+          OTHERS         = 2.
+
+      SELECT SINGLE txt
+        FROM /lime/cust_catsp
+        INTO wa_out-cat_text
+        WHERE cat EQ wa_data-cat
+       AND spras EQ sy-langu.
+
+      SELECT  ddtext INTO wa_out-zjy_text
+        FROM qave AS a
+         INNER JOIN qals AS b ON a~prueflos = b~prueflos
+         INNER JOIN dd07t AS c ON a~vbewertung = c~domvalue_l
+       WHERE b~matnr = wa_out-matnr
+        AND  b~charg = wa_out-charg
+        AND c~ddlanguage = sy-langu
+        AND c~domname = 'QBEWERTUNG'
+        ORDER BY vdatum DESCENDING vezeiterf DESCENDING.   "取检验批记录最新的1条
+
+        EXIT.
+      ENDSELECT.
+      IF wa_out-zjy_text IS INITIAL.
+        wa_out-zjy_text = '没有评估'.
+      ENDIF.
+
+      SELECT SINGLE vfdat
+        INTO wa_out-vfdat
+        FROM mch1
+       WHERE matnr = wa_out-matnr
+        AND charg = wa_out-charg.
+
+      COLLECT wa_out INTO lt_out.
+      CLEAR:wa_data,wa_out.
+    ENDLOOP.
+
+    SORT lt_out BY matnr.
+
+    ev_json = /ui2/cl_json=>serialize( lt_out[] ).
+    CONCATENATE '{"DATA":' ev_json '}' INTO ev_json.
+
+    CLEAR:wa_data,wa_out,w_range,wf_range,wa_range.
+    REFRESH:lt_out,lt_data,r_range,f_range,lt_range.
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

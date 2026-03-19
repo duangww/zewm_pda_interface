@@ -1,0 +1,916 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+METHOD goodsmvt_create.
+
+  ""1.生产订单收货  101
+  ""2.生产订单退料  262
+  ""3.成本中心退料  202
+  ""4.研发中心退料  Z12
+  ""5.调拨入库      311
+  ""6.调拨入库两步  315
+
+  "" aufnr      TYPE afpo-aufnr,  ""生产订单（1.2）/内部订单号（4）
+  "" werks      TYPE t001w-werks, """PDA 仓库编号 3.4.5 传
+  "" kostl      TYPE kostl,       "" 成本中心 3 传
+  "" i_lgort    TYPE afpo-lgort, ""调入库位 5 传
+
+  TYPES:BEGIN OF ty_ty,
+          type  TYPE char3,
+          mblnr TYPE mseg-mblnr,
+          lgnum TYPE /scwm/lgnum,
+        END OF ty_ty.
+
+  TYPES:BEGIN OF ty_dn,
+          aufnr    TYPE afpo-aufnr,  ""生产订单（1.2）/内部订单号（4）
+          matnr    TYPE afpo-matnr,
+          charg    TYPE afpo-charg,
+          lgort    TYPE afpo-lgort,
+          menge    TYPE afpo-wemng,
+          meins    TYPE afpo-meins,
+          werks    TYPE t001w-werks, """PDA 仓库编号 3.4.5 传
+          kostl    TYPE kostl,       "" 成本中心 3 传
+          i_lgort  TYPE afpo-lgort, ""调入库位 5 传
+          pg_unit  TYPE meins,       ""评估单位
+          pg_menge TYPE afpo-wemng,   ""评估数量
+
+
+        END OF ty_dn.""整合准备创建入库创建DN
+  TYPES: BEGIN OF ty_charg ,
+           charg TYPE afpo-charg,
+         END OF ty_charg.
+
+
+  DATA:BEGIN OF ls_ma,
+         mblnr TYPE mseg-mblnr,
+         mjahr TYPE mseg-mjahr,
+       END OF ls_ma.
+
+  DATA lt_in TYPE TABLE OF zewms_goodsmvt_create."明细
+  DATA lt_dn TYPE TABLE OF ty_dn."汇总
+  DATA lt_charg TYPE TABLE OF ty_charg."批次汇总用到
+
+
+  DATA ls_ghead TYPE bapi2017_gm_head_01.
+  DATA ls_gcode TYPE bapi2017_gm_code.
+  DATA ev_mblnr TYPE  bapi2017_gm_head_ret-mat_doc.
+  DATA ev_mjahr TYPE  bapi2017_gm_head_ret-doc_year.
+  DATA lw_gitem TYPE bapi2017_gm_item_create.
+  DATA lt_gitem TYPE TABLE OF bapi2017_gm_item_create .
+  DATA it_return TYPE TABLE OF  bapiret2 .
+  DATA lr_matnr TYPE TABLE OF zewms_ewmmat.
+  DATA et_matnr TYPE STANDARD TABLE OF zewms_ewmmat.
+********************************************************************
+
+  DATA(lv_cdata) = io_request->get_cdata( ).
+
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+  REPLACE ALL OCCURRENCES OF '"data":'  IN lv_cdata WITH space.
+  SHIFT lv_cdata LEFT DELETING LEADING '{'.
+  SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+
+  /ui2/cl_json=>deserialize(
+  EXPORTING json = lv_cdata CHANGING data = lt_in ).
+
+  LOOP AT lt_in ASSIGNING FIELD-SYMBOL(<fs_in>).
+*------------add by yakir at 18.11.2020 18:03:51------begin--*
+    <fs_in>-hubox = |{ <fs_in>-hubox ALPHA = IN }|.
+    <fs_in>-aufnr = |{ <fs_in>-aufnr ALPHA = IN }|.""ADD BY VICKY 09.04.2021 16:51:41
+    <fs_in>-lgnum = to_upper( <fs_in>-lgnum ).
+    TRANSLATE <fs_in>-lgort TO UPPER CASE.
+    TRANSLATE <fs_in>-i_lgort TO UPPER CASE.
+    TRANSLATE <fs_in>-aufnr TO UPPER CASE.
+    TRANSLATE <fs_in>-kostl TO UPPER CASE.
+    SELECT SINGLE charg_line
+    FROM zewmbarcode
+    INTO <fs_in>-charg_line
+    WHERE lgnum EQ <fs_in>-lgnum
+    AND hubox EQ <fs_in>-hubox.
+*------------add by yakir at 18.11.2020 18:03:51------end--*
+
+    IF <fs_in>-hupal = space.
+      SELECT COUNT(*)
+      FROM zzbcrl_hu
+      WHERE hubox = <fs_in>-hubox
+      AND hudel <> 'X'.
+      IF sy-subrc = 0 AND
+      ( <fs_in>-type = '101' OR
+      <fs_in>-type = '531' ) .
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = gs_msg-msg_content
+        &&  '箱HU'
+        && condense( |{ <fs_in>-hubox ALPHA = OUT }| )
+        && '已组托，不允许收货。'.
+      ENDIF.
+    ENDIF.
+*----add by vicky at 17.03.2021 09:10:17  begin-----------*
+    SELECT SINGLE xchpf,mhdhb
+    FROM mara
+    INTO ( @<fs_in>-xchpf,@<fs_in>-mhdhb )
+    WHERE matnr = @<fs_in>-matnr.
+*----add by vicky at 17.03.2021 09:10:17 end-----------*
+*----ADD by vicky AT 09.04.2021 14:35:35  begin-----------*
+    IF <fs_in>-type = '531'.
+      SELECT COUNT(*)
+      FROM resb
+      WHERE aufnr EQ <fs_in>-aufnr
+      AND matnr EQ <fs_in>-matnr
+      AND bwart EQ '531'.
+      IF sy-subrc NE 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = gs_msg-msg_content && '副产品料号' && <fs_in>-matnr
+        && '未维护到生产订单' && <fs_in>-aufnr && '组件中。'.
+
+      ENDIF.
+    ENDIF.
+
+*----add by vicky at 09.04.2021 14:35:35 end-----------*
+
+  ENDLOOP.
+
+
+  IF gs_msg IS NOT INITIAL.
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+    RETURN.
+  ENDIF.
+
+  DELETE lt_in WHERE matnr EQ space.
+
+
+  DATA(ls_ty) = lt_in[ 1 ].
+
+  MOVE-CORRESPONDING  lt_in TO lt_charg.
+  SORT lt_charg BY charg.
+  DELETE ADJACENT DUPLICATES FROM lt_charg COMPARING charg.
+
+  MOVE-CORRESPONDING  lt_in TO lt_dn.
+  SORT lt_dn BY charg.
+  DELETE ADJACENT DUPLICATES FROM lt_dn COMPARING charg.
+
+  ""评估单位 评估数量20191121
+  LOOP AT lt_dn INTO DATA(lw_dn).
+    SELECT SINGLE meinh
+    FROM marm
+    INTO lw_dn-pg_unit
+    WHERE matnr EQ lw_dn-matnr
+    AND ty2tq EQ cn_b.
+
+    IF sy-subrc = 0 AND lw_dn-pg_unit <> space.
+      lw_dn-pg_menge = REDUCE #( INIT x TYPE menge_d
+      FOR wa IN lt_in
+      WHERE ( charg EQ lw_dn-charg )
+      NEXT x = x + 1 ).
+
+      MODIFY lt_dn FROM lw_dn TRANSPORTING pg_unit pg_menge.
+
+    ENDIF.
+
+  ENDLOOP.
+
+
+
+  DATA lv_menge TYPE afpo-wemng.
+  LOOP AT lt_charg INTO DATA(ls_charg).
+    CLEAR lv_menge.
+    LOOP AT lt_in INTO DATA(lw_in) WHERE charg = ls_charg-charg .
+      lv_menge = lv_menge + lw_in-menge.
+    ENDLOOP.
+    CLEAR lw_dn.
+    READ TABLE lt_dn WITH KEY charg = ls_charg-charg INTO lw_dn.
+    IF sy-subrc = 0.
+      lw_dn-menge = lv_menge.
+      MODIFY lt_dn
+      FROM lw_dn
+      TRANSPORTING  menge
+      WHERE charg = ls_charg-charg .
+    ENDIF.
+
+
+  ENDLOOP.
+
+
+
+
+  ls_ghead-pstng_date = sy-datum.
+  ls_ghead-doc_date = sy-datum.
+  ls_ghead-pr_uname = sy-uname.
+
+  ""接口会默认传入202移动类型，
+  "接口判断当传入参数中字段AUFNR为空，移动类型无需变更，
+  "传入字段AUFNR有值，移动类型改为Z12
+  IF ls_ty-type = '202' .
+    LOOP AT lt_in INTO lw_in WHERE aufnr <> space.
+
+    ENDLOOP.
+    IF sy-subrc = 0.
+      ls_ty-type = 'Z12' .
+    ENDIF.
+  ENDIF.
+
+  LOOP AT lt_dn INTO lw_dn WHERE kostl+4(1) = 'D' AND aufnr = space.
+    gs_msg-msg_type = 'E'.
+    gs_msg-msg_content = '研发类成本中心'
+    && lw_dn-kostl
+    && '必须要有内部订单！'.
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+    RETURN.
+  ENDLOOP.
+
+
+
+
+  ""101
+  IF ls_ty-type = '101'.
+    ls_gcode-gm_code = '01'.
+
+
+    LOOP AT lt_in INTO lw_in
+    WHERE xchpf EQ 'X' OR mhdhb = 0
+    GROUP BY ( charg = lw_in-charg ) ASCENDING.
+
+
+      CLEAR lw_gitem.
+
+      SELECT SINGLE meinh
+      FROM marm
+      INTO lw_gitem-entry_uom
+      WHERE matnr EQ lw_in-matnr
+      AND ty2tq EQ cn_b.
+      IF sy-subrc = 0 AND lw_gitem-entry_uom <> space..
+        lw_gitem-entry_qnt = REDUCE #( INIT x TYPE menge_d
+        FOR wa IN lt_in
+        WHERE ( charg EQ lw_in-charg )
+        NEXT x = x + 1 ).
+      ELSE.
+
+        lw_gitem-entry_qnt  = REDUCE #( INIT x TYPE menge_d
+        FOR wa IN lt_in
+        WHERE ( charg EQ lw_in-charg )
+        NEXT x = x + wa-menge ).
+        lw_gitem-entry_uom  = lw_in-meins."单位
+
+      ENDIF.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = lw_in-aufnr
+        IMPORTING
+          output = lw_in-aufnr.
+
+      SELECT SINGLE autyp,werks
+      FROM aufk
+      WHERE aufnr EQ @lw_in-aufnr
+      INTO @DATA(ls_aufk).
+      IF sy-subrc NE 0.
+        CLEAR ls_aufk.
+      ENDIF.
+
+      lw_gitem-move_type  = '101'.
+
+      lw_gitem-mvt_ind    = 'F'.
+      lw_gitem-orderid    = lw_in-aufnr."生产订单
+      lw_gitem-material_long   = lw_in-matnr."物料
+
+      lw_gitem-plant = ls_aufk-werks.
+      lw_gitem-stge_loc   = lw_in-lgort."库存地点
+      lw_gitem-batch      = lw_in-charg."批次
+      APPEND lw_gitem TO lt_gitem.
+    ENDLOOP.
+
+
+    LOOP AT lt_in INTO lw_in
+    WHERE xchpf NE 'X' AND mhdhb > 0
+    GROUP BY ( hsdat = lw_in-hsdat ) ASCENDING.
+
+      CLEAR lw_gitem.
+
+      SELECT SINGLE meinh
+      FROM marm
+      INTO lw_gitem-entry_uom
+      WHERE matnr EQ lw_in-matnr
+      AND ty2tq EQ cn_b.
+      IF sy-subrc = 0 AND lw_gitem-entry_uom <> space..
+        lw_gitem-entry_qnt = REDUCE #( INIT x TYPE menge_d
+        FOR wa IN lt_in
+        WHERE ( hsdat EQ lw_in-hsdat )
+        NEXT x = x + 1 ).
+      ELSE.
+
+        lw_gitem-entry_qnt  = REDUCE #( INIT x TYPE menge_d
+        FOR wa IN lt_in
+        WHERE ( hsdat EQ lw_in-hsdat )
+        NEXT x = x + wa-menge ).
+        lw_gitem-entry_uom  = lw_in-meins."单位
+
+      ENDIF.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = lw_in-aufnr
+        IMPORTING
+          output = lw_in-aufnr.
+
+      SELECT SINGLE autyp,werks
+      FROM aufk
+      WHERE aufnr EQ @lw_in-aufnr
+      INTO @ls_aufk.
+      IF sy-subrc NE 0.
+        CLEAR ls_aufk.
+      ENDIF.
+
+      lw_gitem-move_type  = '101'.
+
+      lw_gitem-mvt_ind    = 'F'.
+      lw_gitem-orderid    = lw_in-aufnr."生产订单
+      lw_gitem-material_long   = lw_in-matnr."物料
+
+      lw_gitem-plant = ls_aufk-werks.
+      lw_gitem-stge_loc   = lw_in-lgort."库存地点
+      lw_gitem-batch      = lw_in-charg."批次
+      lw_gitem-prod_date      = lw_in-hsdat."生产日期
+      APPEND lw_gitem TO lt_gitem.
+    ENDLOOP.
+
+  ENDIF.
+
+  ""262
+  IF ls_ty-type = '262'.
+
+    ls_gcode-gm_code = '03'.
+    "
+    SELECT SINGLE le_vbeln
+    FROM mkpf
+    WHERE mblnr EQ @ls_ty-mblnr
+    INTO @ls_ghead-ref_doc_no_long."物料单
+    IF sy-subrc <> 0 OR ls_ghead-ref_doc_no_long IS INITIAL.
+      ls_ghead-gr_gi_slip_no = ls_ty-mblnr.
+
+    ENDIF.
+
+    """""  LOOP AT lt_dn INTO lw_dn.
+    """""    CLEAR: lw_gitem,ls_aufk.
+    """""
+    """""    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    """""      EXPORTING
+    """""        input  = lw_dn-aufnr
+    """""      IMPORTING
+    """""        output = lw_dn-aufnr.
+    """""
+    """""    SELECT SINGLE autyp,werks
+    """""    FROM aufk
+    """""    WHERE aufnr EQ @lw_dn-aufnr
+    """""    INTO @ls_aufk.
+    """""
+    """""    lw_gitem-move_type  = '262'.
+    """""    lw_gitem-plant      = ls_aufk-werks."工厂
+    """""    lw_gitem-stge_loc   = lw_dn-lgort."库存地点
+    """""    lw_gitem-batch      = lw_dn-charg."批次
+    """""    lw_gitem-material_long   = lw_dn-matnr."物料
+    """""    IF lw_dn-pg_unit <> space .
+    """""      lw_gitem-entry_qnt  = lw_dn-pg_menge."数量
+    """""      lw_gitem-entry_uom  = lw_dn-pg_unit."单位
+    """""    ELSE.
+    """""      lw_gitem-entry_qnt  = lw_dn-menge."数量
+    """""      lw_gitem-entry_uom  = lw_dn-meins."单位
+    """""    ENDIF.
+    """""
+    """""    lw_gitem-xstob  = 'X'."
+    """""    lw_gitem-orderid      = lw_dn-aufnr."生产订单
+    """""
+    """""    SELECT SINGLE rsnum,rspos,rsart
+    """""    FROM resb
+    """""    WHERE matnr = @lw_gitem-material_long
+    """""    AND aufnr = @lw_gitem-orderid
+    """""    INTO @DATA(ls_resb).
+    """""    IF  sy-subrc = 0.
+    """""      lw_gitem-reserv_no = ls_resb-rsnum.  "预留/相关需求的编号
+    """""      lw_gitem-res_item = ls_resb-rspos . "预留 / 相关需求的项目编号
+    """""      lw_gitem-res_type = ls_resb-rsart . "记录类型
+    """""    ENDIF.
+    """""
+    """""    APPEND lw_gitem TO lt_gitem.
+    """""
+    """""
+    """""  ENDLOOP.
+
+  ENDIF.
+
+  ""202
+  IF ls_ty-type = '202'.
+    ls_gcode-gm_code = '03'.
+
+
+
+    """" LOOP AT lt_dn INTO lw_dn.
+    """"   CLEAR lw_gitem.
+    """"
+    """"   lw_gitem-costcenter = lw_dn-kostl."成本中心
+    """"   lw_gitem-move_type  = '202'.
+    """"   lw_gitem-plant = lw_dn-werks.
+    """"   lw_gitem-mvt_ind    = ''.
+    """"   lw_gitem-material_long   = lw_dn-matnr."物料
+    """"   IF lw_dn-pg_unit <> space .
+    """"     lw_gitem-entry_qnt  = lw_dn-pg_menge."数量
+    """"     lw_gitem-entry_uom  = lw_dn-pg_unit."单位
+    """"   ELSE.
+    """"     lw_gitem-entry_qnt  = lw_dn-menge."数量
+    """"     lw_gitem-entry_uom  = lw_dn-meins."单位
+    """"   ENDIF.
+    """"
+    """"   lw_gitem-stge_loc   = lw_dn-lgort."库存地点
+    """"   lw_gitem-batch      = lw_dn-charg."批次
+    """"   APPEND lw_gitem TO lt_gitem.
+    """"
+    """"
+    """" ENDLOOP.
+  ENDIF.
+
+  IF ls_ty-type = 'Z12'.
+
+    ""Z12 参考202
+    ls_gcode-gm_code = '03'.
+
+    """" LOOP AT lt_dn INTO lw_dn.
+    """"
+    """"
+    """"   CLEAR lw_gitem.
+    """"   CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    """"     EXPORTING
+    """"       input  = lw_dn-aufnr
+    """"     IMPORTING
+    """"       output = lw_dn-aufnr.
+    """"   lw_gitem-orderid    = lw_dn-aufnr."内部订单
+    """"   lw_gitem-costcenter = lw_dn-kostl."成本中心
+    """"   lw_gitem-move_type  = 'Z12'.
+    """"   lw_gitem-plant = lw_dn-werks.
+    """"   lw_gitem-mvt_ind    = ''.
+    """"   lw_gitem-material_long   = lw_dn-matnr."物料
+    """"   IF lw_dn-pg_unit <> space .
+    """"     lw_gitem-entry_qnt  = lw_dn-pg_menge."数量
+    """"     lw_gitem-entry_uom  = lw_dn-pg_unit."单位
+    """"   ELSE.
+    """"     lw_gitem-entry_qnt  = lw_dn-menge."数量
+    """"     lw_gitem-entry_uom  = lw_dn-meins."单位
+    """"   ENDIF.
+    """"
+    """"   lw_gitem-stge_loc   = lw_dn-lgort."库存地点
+    """"   lw_gitem-batch      = lw_dn-charg."批次
+    """"   APPEND lw_gitem TO lt_gitem.
+    """"
+    """" ENDLOOP.
+  ENDIF.
+
+  ""311
+  IF ls_ty-type = '311'.
+    ls_gcode-gm_code = '04'.
+
+    """" LOOP AT lt_dn INTO lw_dn.
+    """"   CLEAR lw_gitem.
+    """"
+    """"   CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    """"     EXPORTING
+    """"       input  = lw_dn-aufnr
+    """"     IMPORTING
+    """"       output = lw_dn-aufnr.
+    """"
+    """"   lw_gitem-orderid    = lw_dn-aufnr."内部订单
+    """"   lw_gitem-move_type  = '311'.
+    """"
+    """"   lw_gitem-mvt_ind    = ''.
+    """"   lw_gitem-plant = lw_dn-werks."发出工厂
+    """"   lw_gitem-stge_loc   = lw_dn-lgort."发出库存地点
+    """"   lw_gitem-material_long   = lw_dn-matnr." 发出物料
+****"""" *      IF lw_dn-pg_unit <> space .
+****"""" *        lw_gitem-entry_qnt  = lw_dn-pg_menge."数量
+****"""" *        lw_gitem-entry_uom  = lw_dn-pg_unit."单位
+****"""" *      ELSE.
+    """"   lw_gitem-entry_qnt  = lw_dn-menge."数量
+    """"   lw_gitem-entry_uom  = lw_dn-meins."单位
+****"""" *      ENDIF.
+    """"
+    """"   lw_gitem-batch      = lw_dn-charg."批次
+    """"   lw_gitem-move_plant = lw_dn-werks."接收工厂
+    """"   lw_gitem-move_stloc   = lw_dn-i_lgort."接收库存地点
+    """"   lw_gitem-move_mat   = lw_dn-matnr." 接收物料
+    """"   APPEND lw_gitem TO lt_gitem.
+    """"
+    """" ENDLOOP.
+  ENDIF.
+
+  ""313 315 只做315  不做 313
+  IF ls_ty-type = '315'.
+    ls_gcode-gm_code = '04'.
+    ls_ghead-gr_gi_slip_no = ls_ty-mblnr."313 产生的物料凭证
+
+    """""LOOP AT lt_dn INTO lw_dn.
+    """""  CLEAR lw_gitem.
+    """""
+    """""  lw_gitem-move_type  = '315'.
+    """""
+    """""
+    """""  lw_gitem-plant = lw_dn-werks."发出工厂
+    """""  lw_gitem-stge_loc   = lw_dn-lgort."发出库存地点 /313 的接受库存
+    """""  lw_gitem-material_long   = lw_dn-matnr." 发出物料
+    """""  IF lw_dn-pg_unit <> space .
+    """""    lw_gitem-entry_qnt  = lw_dn-pg_menge."数量
+    """""    lw_gitem-entry_uom  = lw_dn-pg_unit."单位
+    """""  ELSE.
+    """""    lw_gitem-entry_qnt  = lw_dn-menge."数量
+    """""    lw_gitem-entry_uom  = lw_dn-meins."单位
+    """""  ENDIF.
+    """""
+    """""  lw_gitem-batch      = lw_dn-charg."批次
+    """""  APPEND lw_gitem TO lt_gitem.
+    """""
+    """""ENDLOOP.
+  ENDIF.
+  IF ls_ty-type = '531'..
+    ls_gcode-gm_code = '05'.
+  ENDIF.
+
+  IF ls_ty-type = '262'
+  OR ls_ty-type = '311'
+  OR ls_ty-type = 'Z12'
+  OR ls_ty-type = '202'
+  OR ls_ty-type = '315'
+  OR ls_ty-type = '531'.
+
+    LOOP AT lt_in INTO lw_in
+    WHERE xchpf EQ 'X' OR mhdhb = 0
+    GROUP BY ( charg = lw_in-charg ) ASCENDING.
+      CLEAR lw_gitem.
+      CALL FUNCTION 'ZFM_EWM_OTH_IMPORT'
+        EXPORTING
+          iw_in    = lw_in
+          it_in    = lt_in
+          iv_charg = 'X' "按批次
+        CHANGING
+          ew_gitem = lw_gitem.
+
+      APPEND lw_gitem TO lt_gitem.
+
+    ENDLOOP.
+
+    LOOP AT lt_in INTO lw_in
+    WHERE xchpf NE 'X' AND mhdhb > 0
+    GROUP BY ( hsdat = lw_in-hsdat ) ASCENDING.
+      CLEAR lw_gitem.
+      CALL FUNCTION 'ZFM_EWM_OTH_IMPORT'
+        EXPORTING
+          iw_in    = lw_in
+          it_in    = lt_in
+        CHANGING
+          ew_gitem = lw_gitem.
+      APPEND lw_gitem TO lt_gitem.
+
+    ENDLOOP.
+  ENDIF.
+
+
+  """""   ""531
+  """""   IF ls_ty-type = '531'.
+  """""
+  """""     ls_gcode-gm_code = '05'.
+  """""     "
+  """""
+* """""      ls_ghead-ref_doc_no_long = ls_ty-mtsnr."
+  """""
+  """""     LOOP AT lt_dn INTO lw_dn.
+  """""       CLEAR: lw_gitem,ls_aufk.
+  """""
+  """""       CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+  """""         EXPORTING
+  """""           input  = lw_dn-aufnr
+  """""         IMPORTING
+  """""           output = lw_dn-aufnr.
+  """""
+  """""       SELECT SINGLE autyp,werks
+  """""       FROM aufk
+  """""       WHERE aufnr EQ @lw_dn-aufnr
+  """""       INTO @ls_aufk.
+  """""
+  """""       lw_gitem-move_type  = '531'.
+  """""       lw_gitem-plant      = lw_dn-werks."工厂
+  """""       lw_gitem-stge_loc   = lw_dn-lgort."库存地点
+  """""       lw_gitem-batch      = lw_dn-charg."批次
+  """""       lw_gitem-material_long   = lw_dn-matnr."物料
+  """""       IF lw_dn-pg_unit <> space .
+  """""         lw_gitem-entry_qnt  = lw_dn-pg_menge."数量
+  """""         lw_gitem-entry_uom  = lw_dn-pg_unit."单位
+  """""       ELSE.
+  """""         lw_gitem-entry_qnt  = lw_dn-menge."数量
+  """""         lw_gitem-entry_uom  = lw_dn-meins."单位
+  """""       ENDIF.
+  """""
+  """""       lw_gitem-orderid      = lw_dn-aufnr."生产订单
+  """""
+  """""       APPEND lw_gitem TO lt_gitem.
+  """""
+  """""
+  """""     ENDLOOP.
+  """""
+  """""   ENDIF.
+
+*------------add by yakir at 02.11.2020 17:41:55------begin--*
+  IF lt_gitem IS NOT INITIAL.
+    LOOP AT lt_gitem INTO DATA(ls_gitem).
+      IF ls_gitem-move_type EQ '311'.
+        SELECT COUNT(*)
+        FROM t320
+        WHERE werks EQ ls_gitem-move_plant
+        AND lgort EQ ls_gitem-move_stloc.
+      ELSE.
+        SELECT COUNT(*)
+        FROM t320
+        WHERE werks EQ ls_gitem-plant
+        AND lgort EQ ls_gitem-stge_loc.
+      ENDIF.
+
+      IF sy-subrc NE 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '输入的库存地点不属于EWM仓位！'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+
+      lr_matnr = VALUE #( ( matnr = ls_gitem-material_long
+      werks = ls_gitem-plant ) ).
+      CALL FUNCTION 'ZFM_EWM_MATLWH_READ'
+        TABLES
+          it_data = lr_matnr
+          et_data = et_matnr.
+      IF et_matnr IS INITIAL .
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '物料'
+        && ls_gitem-material_long &&
+        '没有启用EWM管理，不允许收货！'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+
+*----ADD by vicky AT 08.06.2021 16:50:20  begin-----------*
+      DATA(lv_uname) = lt_in[ 1 ]-uname.
+      TRANSLATE lv_uname TO UPPER CASE.
+      TRANSLATE ls_gitem-stge_loc TO UPPER CASE.
+      AUTHORITY-CHECK OBJECT 'M_MSEG_LGO'
+      FOR USER lv_uname
+       ID 'WERKS' FIELD ls_gitem-plant
+       ID 'LGORT' FIELD ls_gitem-stge_loc
+       ID 'BWART' FIELD ls_gitem-move_type.
+      IF sy-subrc <> 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '工厂' && ls_gitem-plant
+                              && '库存地点' && ls_gitem-stge_loc
+                              && '移动类型' && ls_gitem-move_type
+                              && '无权限'. .
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+*----add by vicky at 08.06.2021 16:50:20 end-----------*
+    ENDLOOP.
+
+  ENDIF.
+*------------add by yakir at 02.11.2020 17:41:55------end--*
+
+  CALL FUNCTION 'BAPI_GOODSMVT_CREATE'
+    EXPORTING
+      goodsmvt_header  = ls_ghead
+      goodsmvt_code    = ls_gcode
+    IMPORTING
+      materialdocument = ev_mblnr
+      matdocumentyear  = ev_mjahr
+    TABLES
+      goodsmvt_item    = lt_gitem
+      return           = it_return.
+
+
+  IF NOT line_exists( it_return[ type = 'E' ] )
+  AND NOT line_exists( it_return[ type = 'A' ] ).
+
+    CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+      EXPORTING
+        wait = abap_true.
+    IF it_return IS NOT INITIAL.
+      gs_msg-msg_type = 'S'.
+      gs_msg-ref_doc = it_return[ 1 ]-message_v1.
+    ENDIF.
+
+  ELSE.
+    CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+
+    LOOP AT it_return INTO DATA(ls_return)
+          WHERE type = 'E' OR  type = 'A'.
+      gs_msg-msg_type = ls_return-type.
+      gs_msg-msg_content = gs_msg-msg_content && ls_return-message && '.'.
+    ENDLOOP.
+  ENDIF.
+
+  IF gs_msg-msg_type = 'S' AND  ev_mblnr IS INITIAL AND ev_mjahr IS INITIAL.
+
+    DATA lv_dn TYPE vbeln_vl.
+    DATA lv_lgnum TYPE /scwm/lgnum.
+    DATA lt_data TYPE TABLE OF zewms004.
+    DATA ls_msg TYPE zbaks_msg_pda.
+    DATA lv_dn_item TYPE lips-posnr.
+    lv_dn = gs_msg-ref_doc.
+    lv_lgnum = ls_ty-lgnum.
+    MOVE-CORRESPONDING lt_in TO lt_data.
+
+*----add by vicky at 17.03.2021 10:11:19  begin-----------*
+    IF ls_ty-type = '101'
+    OR ls_ty-type = '262'
+    OR ls_ty-type = '311'
+    OR ls_ty-type = 'Z12'
+    OR ls_ty-type = '202'
+    OR ls_ty-type = '315'
+    OR ls_ty-type = '531'.
+      CLEAR lv_dn_item.
+      LOOP AT lt_in INTO lw_in
+      WHERE xchpf EQ 'X' OR mhdhb = 0
+      GROUP BY ( charg = lw_in-charg ) ASCENDING.
+
+        ADD 10 TO lv_dn_item.
+        LOOP AT lt_data
+        ASSIGNING  FIELD-SYMBOL(<fs_data>)
+        WHERE charg = lw_in-charg
+        AND ( xchpf EQ 'X'
+        OR mhdhb = 0 ) .
+
+          <fs_data>-dn_item = lv_dn_item.
+        ENDLOOP.
+      ENDLOOP.
+      LOOP AT lt_in INTO lw_in
+      WHERE xchpf NE 'X' AND mhdhb > 0
+      GROUP BY ( hsdat = lw_in-hsdat ) ASCENDING.
+
+        ADD 10 TO lv_dn_item.
+        LOOP AT lt_data
+        ASSIGNING  <fs_data>
+        WHERE hsdat = lw_in-hsdat
+        AND xchpf NE 'X'
+        AND mhdhb > 0.
+
+          <fs_data>-dn_item = lv_dn_item.
+        ENDLOOP.
+      ENDLOOP.
+*----add by vicky at 17.03.2021 10:11:19 end-----------*
+
+    ELSE.
+      CLEAR lv_dn_item.
+      LOOP AT lt_charg INTO ls_charg.
+        ADD 10 TO lv_dn_item.
+        LOOP AT lt_data
+        ASSIGNING <fs_data>
+        WHERE charg = ls_charg-charg .
+
+          <fs_data>-dn_item = lv_dn_item.
+        ENDLOOP.
+      ENDLOOP.
+    ENDIF.
+
+
+    lv_dn = |{ lv_dn ALPHA = IN }|.
+
+    LOOP AT lt_data INTO DATA(ls_data).
+
+      SELECT SINGLE meinh
+      FROM marm
+      INTO ls_data-pg_unit
+      WHERE matnr EQ ls_data-matnr
+      AND ty2tq EQ cn_b.
+
+
+      MODIFY lt_data FROM ls_data TRANSPORTING pg_unit.
+
+    ENDLOOP.
+
+
+*------------add by yakir at 21.01.2021 18:50:28------begin--*
+    IF ls_ty-type EQ '311'.
+      DATA lt_qty TYPE zewmt_dn_qty.
+
+      LOOP AT lt_data
+      INTO ls_data
+      GROUP BY ls_data-dn_item.
+        CHECK ls_data-pg_unit IS NOT INITIAL.
+
+        lt_qty = VALUE #( BASE lt_qty
+        ( dn_item = ls_data-dn_item
+        qty = REDUCE #( INIT q TYPE /scdl/dl_quantity
+        FOR wa_data
+        IN lt_data
+        WHERE ( dn_item = ls_data-dn_item )
+        NEXT q = q + 1 )
+        uom = ls_data-pg_unit  ) ).
+      ENDLOOP.
+      IF lt_qty IS NOT INITIAL.
+        CALL FUNCTION 'ZFM_EWM_DN_QTY_MOD'
+          EXPORTING
+            iv_dn    = lv_dn
+            iv_lgnum = lv_lgnum
+            it_qty   = lt_qty.
+      ENDIF.
+
+
+    ENDIF.
+*------------add by yakir at 21.01.2021 18:50:28------end--*
+
+    CALL FUNCTION 'ZFM_EWM_PACK'
+      EXPORTING
+        iv_dn    = lv_dn
+        iv_lgnum = lv_lgnum
+      TABLES
+        it_data  = lt_data
+      CHANGING
+        gs_msg   = ls_msg.
+    IF ls_msg-msg_type = 'S' AND ( ls_ty-type = '101'
+    OR ls_ty-type EQ '531' ).."打包成功
+*------------add by yakir at 18.11.2020 18:09:59------begin--*
+      DATA lv_upd TYPE c.
+      ""先判断是否有批次，无批次时更新YPPU_BATCH表的PRD_STATUS=X, ，有批次时再判断物料类型，是ROH表的PRD_STATUS=X。
+      "否则根据AUFNR,CHARG,CHARG_LINE 更新ZPPT_BATCH表 WH_STATUS =X。
+      LOOP AT lt_in INTO DATA(ls_in).
+        ls_in-matnr = to_upper( ls_in-matnr ).
+        ls_in-aufnr = |{ ls_in-aufnr ALPHA = IN }|.
+
+        SELECT SINGLE b_grqty
+        FROM zppt_batch
+        INTO @DATA(lv_grqty)
+              WHERE aufnr EQ @ls_in-aufnr
+              AND charg EQ @ls_in-charg
+              AND matnr EQ @ls_in-matnr
+              AND charg_line EQ @ls_in-charg_line.
+        IF sy-subrc EQ 0.
+          lv_grqty = lv_grqty + ls_in-menge.
+          UPDATE zppt_batch
+          SET b_grqty = lv_grqty
+          WHERE aufnr EQ ls_in-aufnr
+          AND charg EQ ls_in-charg
+          AND matnr EQ ls_in-matnr
+          AND charg_line EQ ls_in-charg_line.
+          COMMIT WORK AND WAIT.
+        ENDIF.
+
+        CLEAR lv_upd.
+        IF ls_in-charg IS INITIAL.
+          lv_upd = abap_true.
+        ELSE.
+          SELECT COUNT(*)
+          FROM mara
+          WHERE matnr EQ ls_in-matnr
+          AND mtart EQ 'ROH'.
+          IF sy-subrc EQ 0.
+            lv_upd = abap_true.
+          ENDIF.
+        ENDIF.
+        IF lv_upd EQ abap_true.
+          UPDATE yppu_batch
+          SET wh_status = abap_true
+          WHERE aufnr EQ ls_in-aufnr
+          AND matnr EQ ls_in-matnr
+          AND charg_line EQ ls_in-charg_line.
+        ELSE.
+          UPDATE zppt_batch
+          SET wh_status = abap_true
+          WHERE aufnr EQ ls_in-aufnr
+          AND charg EQ ls_in-charg
+          AND matnr EQ ls_in-matnr
+          AND charg_line EQ ls_in-charg_line.
+        ENDIF.
+        COMMIT WORK.
+      ENDLOOP.
+
+
+    ENDIF.
+
+  ENDIF.
+
+  IF ev_mblnr IS NOT INITIAL AND ev_mjahr IS NOT INITIAL.
+    ls_ma-mblnr = ev_mblnr.
+    ls_ma-mjahr = ev_mjahr.
+    ev_json = /ui2/cl_json=>serialize( ls_ma ).
+  ELSE.
+    IF ls_msg IS NOT INITIAL.
+      IF ls_msg-msg_type <> 'S'."打包失败
+        gs_msg-msg_type = ls_msg-msg_type.
+
+      ENDIF.
+      gs_msg-msg_content = gs_msg-msg_content && '. 打包:' && ls_msg-msg_content.
+*****      IF lt_ppt_type = 'E'.
+*****        gs_msg-msg_content = gs_msg-msg_content && '.更新入库申请数据失败'.
+*****      ENDIF.
+    ENDIF.
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+  ENDIF.
+
+
+
+
+ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

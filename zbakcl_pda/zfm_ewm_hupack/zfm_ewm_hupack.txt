@@ -1,0 +1,36 @@
+FUNCTION zfm_ewm_hupack.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  EXPORTING
+*"     VALUE(E_HUPAL) TYPE  /SCWM/HUIDENT
+*"----------------------------------------------------------------------
+
+  DATA lt_i TYPE TABLE OF zscms005 WITH HEADER LINE.
+  DATA lt_e TYPE TABLE OF zscms004 WITH HEADER LINE.
+  CLEAR: lt_e,lt_i,lt_e[],lt_i[].
+
+  lt_i-pacty = '02'.
+  lt_i-count = 1.
+  APPEND lt_i.
+
+
+  "取托盘 02 HU号
+  CALL FUNCTION 'ZFM_SCMEWM_NUM'
+    TABLES
+      et_num = lt_e
+      it_num = lt_i.
+  IF lt_e IS NOT INITIAL.
+    e_hupal = lt_e[ 1 ]-numbe .
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = e_hupal
+      IMPORTING
+        output = e_hupal.
+
+  ENDIF.
+
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

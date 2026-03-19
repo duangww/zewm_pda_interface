@@ -1,0 +1,660 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD inbound_dn_by_po.
+
+*    DATA:BEGIN OF ls_data,
+*           ebeln   TYPE ekpo-ebeln,
+*           ebelp   TYPE ekpo-ebelp,
+*           pdate   TYPE sy-datum,
+*           batch   TYPE char50,
+*           lgort   TYPE ekpo-lgort,
+*           menge   TYPE ekpo-menge,
+*           meins   TYPE ekpo-meins,
+*           hu_son  TYPE  /scwm/de_huident,
+*           hu_type TYPE char10,
+*           hu_dad  TYPE /scwm/de_huident,
+**------------add by yakir at 05.11.2019 14:44:26------begin--*
+*           ""自取字段
+*           matnr   TYPE ekpo-matnr,
+*           lifnr   TYPE ekko-lifnr,
+**------------add by yakir at 05.11.2019 14:44:26------end--*
+*
+*         END OF ls_data.
+
+    DATA ls_data TYPE zewms004.
+    DATA lt_data LIKE TABLE OF ls_data.
+    DATA lr_matnr TYPE TABLE OF zewms_ewmmat.
+    DATA et_matnr TYPE STANDARD TABLE OF zewms_ewmmat.
+    DATA lv_msg TYPE string.
+    DATA: lv_sum_menge TYPE ekpo-menge,
+          lv_po_menge  TYPE ekpo-menge,
+          lv_cg        TYPE ekpo-menge.
+
+    DATA:BEGIN OF gs_xchpf,
+           matnr TYPE mara-matnr,
+           xchpf TYPE mara-xchpf,
+         END OF gs_xchpf.
+    DATA it_xchpf LIKE TABLE OF gs_xchpf .
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+    REPLACE ALL OCCURRENCES OF '"data":'  IN lv_cdata WITH space.
+    SHIFT lv_cdata LEFT DELETING LEADING '{'.
+    SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_data ).
+
+    IF lt_data IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    ""读取po数据
+    LOOP AT lt_data INTO ls_data.
+      DATA(lv_tabix) = sy-tabix.
+
+      CLEAR: lv_po_menge,lv_sum_menge,lv_cg.
+
+* 对HU加锁处理，避免并发。导致订单数量检查失效，生成了多个DN
+      CALL FUNCTION 'ZFM_LOCK_HU'
+        EXPORTING
+          i_hubox = ls_data-hubox
+          i_hupal = ls_data-hupal
+        IMPORTING
+          es_msg  = gs_msg.
+      IF gs_msg-msg_type = 'E'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+
+      SELECT SINGLE matnr,lifnr,werks
+        FROM ekko AS a
+        JOIN ekpo AS b ON a~ebeln EQ b~ebeln
+        INTO CORRESPONDING FIELDS OF @ls_data
+        WHERE a~ebeln EQ @ls_data-ebeln
+          AND ebelp EQ @ls_data-ebelp.
+
+      SELECT SINGLE meinh
+        FROM marm
+        INTO ls_data-pg_unit
+        WHERE matnr EQ ls_data-matnr
+          AND ty2tq EQ cn_b.
+
+      TRANSLATE ls_data-lgort TO UPPER CASE.
+
+*------------add by yakir at 02.11.2020 17:41:55------begin--*
+      IF lv_tabix EQ 1.
+        SELECT COUNT(*)
+          FROM t320
+          WHERE werks EQ ls_data-werks
+            AND lgort EQ ls_data-lgort.
+        IF sy-subrc NE 0.
+          gs_msg-msg_type = 'E'.
+          gs_msg-msg_content = '输入的库存地点不属于EWM仓位！'.
+          ev_json = /ui2/cl_json=>serialize( gs_msg ).
+          RETURN.
+        ENDIF.
+      ENDIF.
+
+*----ADD by vicky AT 08.06.2021 16:57:15  begin-----------*
+
+      TRANSLATE ls_data-uname TO UPPER CASE.
+      TRANSLATE ls_data-werks TO UPPER CASE.
+      AUTHORITY-CHECK OBJECT 'M_MSEG_LGO'
+      FOR USER ls_data-uname
+       ID 'WERKS' FIELD ls_data-werks
+       ID 'LGORT' FIELD ls_data-lgort.
+      IF sy-subrc <> 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '工厂' && ls_data-werks
+                              && '库存地点' && ls_data-lgort
+                              && '无权限'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+*----add by vicky at 08.06.2021 16:57:15 end-----------*
+
+      SELECT COUNT(*)
+        FROM ekpo
+        WHERE ebeln EQ ls_data-ebeln
+          AND ebelp EQ ls_data-ebelp
+          AND bstae NE '0004'.
+      IF sy-subrc EQ 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '采购订单' && ls_data-ebeln &&
+        '项目' && ls_data-ebelp && '未启用0004确认控制码，不允许创建交货单！'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+
+
+      lr_matnr = VALUE #( ( matnr = ls_data-matnr werks = ls_data-werks ) ).
+      CALL FUNCTION 'ZFM_EWM_MATLWH_READ'
+        TABLES
+          it_data = lr_matnr
+          et_data = et_matnr.
+      IF et_matnr IS INITIAL .
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '采购订单' && ls_data-ebeln &&
+        '项目' && ls_data-ebelp && '物料没有启用EWM管理，不允许收货！'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+*****      ELSE.
+******------------add by yakir at 11.11.2020 16:05:23------begin--*
+*****        SELECT COUNT(*)
+*****          FROM ekpo
+*****          WHERE ebeln EQ ls_data-ebeln
+*****            AND ebelp EQ ls_data-ebelp
+*****            AND bstae EQ '0004'.
+*****        IF sy-subrc NE 0.
+*****          gs_msg-msg_type = 'E'.
+*****          gs_msg-msg_content = '采购订单' && ls_data-ebeln &&
+*****          '项目' && ls_data-ebelp && '不能收货，需要行项目选择确认控制0004'.
+*****          ev_json = /ui2/cl_json=>serialize( gs_msg ).
+*****          RETURN.
+*****        ENDIF.
+******------------add by yakir at 11.11.2020 16:05:23------end--*
+      ENDIF.
+
+*------------add by yakir at 02.11.2020 17:41:55------end--*
+
+
+*------------add by baksapkf at 05.07.2023 13:38:30------begin--*
+****  控制委外订单收货不收子件为批次物料。
+      SELECT COUNT(*)
+      FROM ekpo
+      WHERE ebeln EQ ls_data-ebeln
+        AND ebelp EQ ls_data-ebelp
+        AND pstyp EQ '3'.
+      IF sy-subrc EQ 0.
+
+        SELECT resb~matnr,
+               mara~xchpf
+        INTO CORRESPONDING FIELDS OF TABLE @it_xchpf
+        FROM resb
+        LEFT JOIN mara ON resb~matnr = mara~matnr
+        WHERE ebeln EQ @ls_data-ebeln
+         AND ebelp EQ @ls_data-ebelp.
+
+        IF it_xchpf IS NOT INITIAL.
+
+          LOOP AT it_xchpf INTO DATA(lm_xchpf).
+
+            IF lm_xchpf-xchpf EQ 'X'.
+
+              gs_msg-msg_type = 'E'.
+              gs_msg-msg_content = '采购订单' && ls_data-ebeln &&
+              '项目' && ls_data-ebelp && '物料子件启用批次管理，不允许收货！'.
+              ev_json = /ui2/cl_json=>serialize( gs_msg ).
+              RETURN.
+
+            ENDIF.
+
+          ENDLOOP.
+
+        ENDIF.
+
+      ENDIF.
+
+*------------add by baksapkf at 05.07.2023 13:38:30------end--*
+* 检查本次汇总入库数量+已入库数量是否超过采购订单行数量 Jeff 20250618
+
+* 已入库数量
+      SELECT SUM( CASE shkzg WHEN 'H' THEN - menge
+                             WHEN 'S' THEN menge
+                  END ) INTO @DATA(lv_ygz)
+         FROM ekbe
+         WHERE ebeln = @ls_data-ebeln
+         AND   ebelp = @ls_data-ebelp
+         AND   bewtp = 'E'.
+
+* 本次入库数量
+      LOOP AT lt_data INTO DATA(ls_data2) WHERE ebeln = ls_data-ebeln
+                                           AND  ebelp = ls_data-ebelp.
+
+        lv_sum_menge = lv_sum_menge + ls_data2-menge.
+        CLEAR: ls_data2.
+      ENDLOOP.
+
+* 采购订单行数量
+      SELECT SINGLE menge
+        INTO lv_po_menge
+        FROM ekpo
+      WHERE ebeln = ls_data-ebeln
+        AND ebelp = ls_data-ebelp.
+
+      lv_cg = lv_sum_menge + lv_ygz - lv_po_menge.
+
+      IF lv_cg > 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '采购订单' && ls_data-ebeln &&
+        '项目' && ls_data-ebelp && 'PU 订购数量超过了' && lv_cg .
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+
+      MODIFY lt_data FROM ls_data TRANSPORTING matnr lifnr pg_unit lgort.
+
+      CLEAR: lv_ygz,ls_data.
+
+    ENDLOOP.
+
+
+
+    DATA:BEGIN OF ls_charg,
+           posnr TYPE posnr,
+           charg TYPE charg_d,
+           lgort TYPE lgort_d,
+           hsdat TYPE zewmbarcode-hsdat, ""ADD BY VICKY 16.03.2021 16:58:21
+         END OF ls_charg.
+
+    DATA ls_header TYPE bbp_inbd_l.
+    DATA lt_item TYPE TABLE OF bbp_inbd_d .
+    DATA ls_item TYPE bbp_inbd_d.
+    DATA lt_return TYPE TABLE OF bapireturn.
+    DATA lv_vbeln TYPE likp-vbeln.
+    DATA ls_attr TYPE bapibatchatt.
+    DATA lt_ret TYPE TABLE OF bapiret2.
+    DATA lv_charg TYPE bapibatchkey-batch.
+    DATA lt_charg LIKE TABLE OF ls_charg.
+
+    DATA: lv_key        TYPE bapi1003_key-object,
+          lv_key_long   TYPE bapi1003_key-object_long,
+          lv_table      TYPE bapi1003_key-objecttable,
+          lv_class      TYPE bapi1003_key-classnum,
+          lv_class_type TYPE bapi1003_key-classtype,
+          lv_status     TYPE bapi1003_key-status,
+          lt_ret_batch  TYPE TABLE OF bapiret2,
+          lt_alloc_num  TYPE TABLE OF bapi1003_alloc_values_num,
+          lt_alloc_char TYPE TABLE OF bapi1003_alloc_values_char,
+          ls_alloc_char TYPE bapi1003_alloc_values_char,
+          lt_alloc_curr TYPE TABLE OF bapi1003_alloc_values_curr,
+          ls_bf         TYPE bapibatchctrl.
+
+    ls_header-deliv_date = sy-datum.
+
+    DATA(lv_item) = 10.
+
+    LOOP AT lt_data INTO DATA(ls_head)
+      GROUP BY ( ebeln = ls_head-ebeln
+                 ebelp = ls_head-ebelp
+                 licha = ls_head-licha ) ASCENDING.
+
+      ""ADD BY VICKY 20191121 创建批次特性前检查是否启用批次特性
+      SELECT SINGLE matnr,xchpf,mhdhb
+        FROM mara
+        INTO @DATA(ls_xchpf)
+        WHERE matnr = @ls_head-matnr.
+
+*      "ADDED BY RAY 20240119 START
+      SELECT SINGLE matkl
+        INTO @DATA(lv_matkl)
+        FROM mara
+        WHERE matnr = @ls_head-matnr.
+*      IF lv_matkl = 'A002001' OR ls_head-matnr(6) = 'RW0001'.
+*        ls_head-hsdat = sy-datum.
+*      ENDIF.
+**      CLEAR LV_MATKL.
+*      "ADDED BY RAY 20240119 END
+
+      IF sy-subrc = 0 AND ls_xchpf-xchpf = 'X'.
+
+        ""根据新的厂商批次建立新批次
+        CLEAR ls_attr.
+        CLEAR lv_charg.
+        CLEAR ls_bf.
+        REFRESH lt_ret.
+        "ADDED BY RAY 20240119 START
+        IF lv_matkl = 'A002001' OR ls_head-matnr(6) = 'RW0001'.
+          ls_head-hsdat = sy-datum.
+        ELSE.
+        ENDIF.
+        CLEAR lv_matkl.
+        "ADDED BY RAY 20240119 END
+        ls_attr-prod_date = ls_head-hsdat.
+        ls_attr-vendrbatch = ls_head-licha.   "供应商批次 Jeff 20241227
+        ls_bf-doclassify = abap_true.
+
+        CALL FUNCTION 'BAPI_BATCH_CREATE'
+          EXPORTING
+            batchattributes    = ls_attr
+            material_long      = ls_head-matnr
+            batchcontrolfields = ls_bf
+          IMPORTING
+            batch              = lv_charg
+          TABLES
+            return             = lt_ret.
+
+
+        IF NOT line_exists( lt_ret[ type = 'E' ] ) AND
+        NOT line_exists( lt_ret[ type = 'A' ] ).
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+            EXPORTING
+              wait = abap_true.
+
+
+          DO  .""需要等待TABLE 写入
+
+            IF sy-index EQ 20.
+              gs_msg-msg_type = 'E'.
+              gs_msg-msg_content = '批次创建失败！未知原因。'.
+              ev_json = /ui2/cl_json=>serialize( gs_msg ).
+              RETURN.
+            ENDIF.
+
+            SELECT COUNT(*)
+            FROM mch1
+            WHERE matnr EQ ls_head-matnr
+            AND charg EQ lv_charg.
+
+            IF sy-subrc NE 0 AND sy-index < 25.
+              WAIT UP TO 1 SECONDS.
+            ELSE.
+              EXIT.
+            ENDIF.
+
+          ENDDO.
+
+          ""写入批次特性
+          lv_class_type = '023'.
+          lv_key+0(18) = ls_head-matnr.
+          lv_key+18(10) = lv_charg.
+          lv_table = 'MCH1'.
+          lv_class = 'YB_EXP_DATE_002'.
+
+          REFRESH lt_alloc_char.
+
+          CLEAR ls_alloc_char.
+          ls_alloc_char-charact = 'Z_VENDORBATCH'.
+          ls_alloc_char-value_char = ls_head-licha.
+          ls_alloc_char-value_neutral = ls_head-licha.
+          APPEND ls_alloc_char TO lt_alloc_char.
+
+          CLEAR ls_alloc_char.
+          ls_alloc_char-charact = 'Z_PONO1'.
+          ls_alloc_char-value_char = ls_head-ebeln.
+          ls_alloc_char-value_neutral = ls_head-ebeln.
+          APPEND ls_alloc_char TO lt_alloc_char.
+
+*------------add by baksapkf at 09.06.2023 09:08:25------begin--*
+****      增加内部订单号特性写入
+          SELECT SINGLE bednr,afnam
+          FROM ekpo
+          INTO @DATA(ls_ekpo)
+          WHERE ebeln = @ls_head-ebeln
+          AND   ebelp = @ls_head-ebelp.
+
+          CLEAR ls_alloc_char.
+          ls_alloc_char-charact = 'Z_REQUIREMENT'.
+          ls_alloc_char-value_char = ls_ekpo-bednr.
+          ls_alloc_char-value_neutral = ls_ekpo-bednr.
+          APPEND ls_alloc_char TO lt_alloc_char.
+
+
+          CLEAR ls_alloc_char.
+          ls_alloc_char-charact = 'Z_APPLICANT'.
+          ls_alloc_char-value_char = ls_ekpo-afnam.
+          ls_alloc_char-value_neutral = ls_ekpo-afnam.
+          APPEND ls_alloc_char TO lt_alloc_char.
+*------------add by baksapkf at 09.06.2023 09:08:25------end--*
+
+          REFRESH lt_ret_batch.
+
+          CALL FUNCTION 'BAPI_OBJCL_CHANGE'
+            EXPORTING
+              objectkey          = lv_key
+              objecttable        = lv_table
+              classnum           = lv_class
+              classtype          = lv_class_type
+              status             = '1'
+              keydate            = sy-datum
+              objectkey_long     = lv_key_long
+            IMPORTING
+              classif_status     = lv_status
+            TABLES
+              allocvaluesnumnew  = lt_alloc_num
+              allocvaluescharnew = lt_alloc_char
+              allocvaluescurrnew = lt_alloc_curr
+              return             = lt_ret_batch.
+
+          IF NOT line_exists( lt_ret_batch[ type = 'E' ] ) AND
+          NOT line_exists( lt_ret_batch[ type = 'A' ] ).
+            CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+              EXPORTING
+                wait = abap_true.
+          ELSE.
+
+            CLEAR: lv_msg.
+            LOOP AT lt_ret_batch INTO DATA(ls_ret_batch) WHERE type CA 'AEX'.
+              lv_msg = lv_msg && ls_ret_batch-message && '/'.
+            ENDLOOP.
+
+            gs_msg-msg_content = |批次特性写入失败:{ lv_msg }|.
+
+            CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+            gs_msg-msg_type = 'E'.
+*           gs_msg-msg_content = '批次特性写入失败！请检查批次是否异常。'.
+            ev_json = /ui2/cl_json=>serialize( gs_msg ).
+            RETURN.
+          ENDIF.
+
+        ELSE.
+
+          CLEAR: lv_msg.
+          LOOP AT lt_ret INTO DATA(ls_ret) WHERE type CA 'AEX'.
+            lv_msg = lv_msg && ls_ret-message && '/'.
+          ENDLOOP.
+
+          gs_msg-msg_content = |批次创建失败:{ lv_msg }|.
+
+          CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+          gs_msg-msg_type = 'E'.
+*          gs_msg-msg_content = '批次创建失败！请检查流水码问题。'.
+          ev_json = /ui2/cl_json=>serialize( gs_msg ).
+          RETURN.
+        ENDIF.
+
+*----add by vicky at 16.03.2021 17:18:18  begin-----------*
+      ELSEIF sy-subrc NE 0.
+        CLEAR ls_xchpf.
+*----add by vicky at 16.03.2021 17:18:18 end-----------*
+
+      ENDIF.
+
+
+
+
+      CLEAR ls_item.
+      ls_item-deliv_item = lv_item.
+      ADD 10 TO lv_item.
+
+
+
+      ""DN item 要存储一下，打包时要对应
+      ls_head-dn_item = ls_item-deliv_item.
+      MODIFY lt_data FROM ls_head TRANSPORTING dn_item
+      WHERE ebeln = ls_head-ebeln
+        AND ebelp = ls_head-ebelp
+        AND licha = ls_head-licha.
+
+      ""数量分2种情况
+      ""1.启用了评估数量的物料，先去主数据获取到对应的评估单位，
+      ""然后根据 po+item+供应商批次分组获取有几个box
+      ""根据box数和box单位（评估单位） 去创建DN
+
+      ""2.没有启用评估数的单位，直接按以上条件汇总生成DN即可
+
+
+      IF ls_head-pg_unit IS NOT INITIAL.
+        ls_item-deliv_qty = REDUCE #( INIT x TYPE menge_d
+        FOR wa IN lt_data
+        WHERE ( ebeln EQ ls_head-ebeln
+          AND ebelp EQ ls_head-ebelp
+          AND licha EQ ls_head-licha )
+        NEXT x = x + 1 ).
+
+        ls_item-unit = ls_head-pg_unit.
+      ELSE.
+        ls_item-deliv_qty = REDUCE #( INIT x TYPE menge_d
+        FOR wa IN lt_data
+        WHERE ( ebeln EQ ls_head-ebeln
+          AND ebelp EQ ls_head-ebelp
+          AND licha EQ ls_head-licha )
+        NEXT x = x + wa-menge ).
+
+        ls_item-unit = ls_head-meins.
+      ENDIF.
+
+
+
+      ls_item-po_number = ls_head-ebeln.
+      ls_item-po_item = ls_head-ebelp.
+      APPEND ls_item TO lt_item.
+
+*------------add by yakir at 04.11.2019 10:59:42------begin--*
+      CLEAR ls_charg.
+      ls_charg-posnr = ls_item-deliv_item.
+      ls_charg-charg = lv_charg.
+      ls_charg-lgort = ls_head-lgort.
+*----ADD by vicky AT 16.03.2021 17:20:02  begin-----------*
+      IF ls_xchpf-xchpf NE 'X'
+        AND ls_xchpf-mhdhb > 0.
+        "ADDED BY RAY 20240119 START
+*        IF lv_matkl = 'A002001' OR ls_head-matnr(6) = 'RW0001'.
+**          ls_charg-hsdat = sy-datum.
+*          LS_HEAD-HSDAT = SY-DATUM.
+*        ELSE.
+*        ENDIF.
+        "ADDED BY RAY 20240119 END
+        ls_charg-hsdat = ls_head-hsdat.
+      ENDIF.
+*----add by vicky at 16.03.2021 17:20:02 end-----------*
+      APPEND ls_charg TO lt_charg.
+*------------add by yakir at 04.11.2019 10:59:42------end--*
+
+*****      ENDLOOP.
+
+
+    ENDLOOP.
+
+
+
+    EXPORT lt_charg = lt_charg TO MEMORY ID 'ZPDA_CHARG'.
+
+
+    CALL FUNCTION 'BBP_INB_DELIVERY_CREATE'
+      EXPORTING
+        is_inb_delivery_header = ls_header
+      IMPORTING
+        ef_delivery            = lv_vbeln
+      TABLES
+        it_inb_delivery_detail = lt_item
+        return                 = lt_return.
+
+
+    IF NOT line_exists( lt_return[ type = 'E' ] ) AND
+      NOT line_exists( lt_return[ type = 'A' ] )
+      AND lv_vbeln IS NOT INITIAL.
+
+      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+        EXPORTING
+          wait = abap_true.
+
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '交货单创建成功！'.
+      gs_msg-ref_doc = lv_vbeln.
+    ELSE.
+      CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '交货单创建失败！失败原因：'.
+      LOOP AT lt_return INTO DATA(ls_return).
+*  MESSAGE ID LS_RETURN-msgid TYPE sy-msgty NUMBER sy-msgno
+*          INTO DATA(mtext)
+*          WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+
+        gs_msg-msg_content = gs_msg-msg_content && '(' && sy-tabix && ').'
+        && ls_return-message && '______'.
+      ENDLOOP.
+      IF sy-subrc NE 0.
+        gs_msg-msg_content = gs_msg-msg_content && '采购订单被锁定或采购订单异常！'.
+      ENDIF.
+    ENDIF.
+
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+
+    CHECK gs_msg-msg_type NE 'E'.
+
+    ""对数据进行打包
+    CALL FUNCTION 'ZFM_EWM_PACK'
+      EXPORTING
+        iv_dn    = lv_vbeln
+        iv_lgnum = lt_data[ 1 ]-lgnum
+      TABLES
+        it_data  = lt_data
+      CHANGING
+        gs_msg   = gs_msg.
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+
+*------------add by yakir at 26.11.2019 14:10:43------begin--*
+    ""提交数据到SCM
+    CHECK gs_msg-msg_type NE 'E'.
+    DATA lt_scm TYPE TABLE OF zewms_scm.
+    IMPORT lt_scm = lt_scm FROM MEMORY ID 'ZSCMBAR'.
+
+    DATA ls_log TYPE ztpda_jk_log.
+
+    IF lt_scm IS NOT  INITIAL.
+      DATA(lv_json) = /ui2/cl_json=>serialize( lt_scm ).
+      lv_json = '{ "UPDATELIST":' && lv_json && '}'.
+*     CALL FUNCTION 'ZFM_SCM_DATA_SAVE' STARTING NEW TASK 'ZSCM_T1'
+
+      ls_log-request_id = gv_request_id.
+      ls_log-request_data = lv_json.
+      ls_log-action = 'ZFM_SCM_DATA_SAVE'.
+      ls_log-create_user = sy-uname.
+      ls_log-create_date = sy-datum.
+      ls_log-create_time = sy-uzeit.
+
+      MODIFY ztpda_jk_log FROM ls_log.
+      COMMIT WORK.
+
+
+      CALL FUNCTION 'ZFM_SCM_DATA_SAVE' IN BACKGROUND TASK
+        EXPORTING
+          iv_json       = lv_json
+          iv_request_id = gv_request_id.
+
+      COMMIT WORK.
+    ENDIF.
+
+* 解锁
+    CLEAR: ls_data.
+    LOOP AT lt_data INTO ls_data.
+      CALL FUNCTION 'ZFM_UNLOCK_HU'
+        EXPORTING
+          i_hubox = ls_data-hubox
+          i_hupal = ls_data-hupal.
+      CLEAR:ls_data.
+    ENDLOOP.
+
+    ""提交数据到EWM ZTABLE
+    "SCM条码收货时将条码信息回写EWM，需要更新的表：条码信息表（ZEWMBARCODE）、条码关系表（ZZBCRL_HU）
+
+*------------add by yakir at 26.11.2019 14:10:43------end--*
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

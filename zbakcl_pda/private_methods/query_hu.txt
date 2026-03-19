@@ -1,0 +1,544 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD query_hu.
+
+    "传入参数：仓库 HU号码
+    TYPES:BEGIN OF ty_in,
+            lgnum   TYPE zzbcrl_hu-lgnum,
+            huident TYPE /scwm/de_huident,
+          END OF ty_in.
+    DATA ls_in TYPE ty_in.
+
+    "传出托盘信息
+    DATA lt_pal TYPE TABLE OF zewms002.
+    DATA:lt_pal1 TYPE TABLE OF zewms002.
+    DATA lw_pal TYPE zewms002.
+
+
+    "传出：箱hu信息
+    DATA lt_box TYPE TABLE OF zewms004.
+    DATA lw_box TYPE zewms004.
+
+*    DATA: lo_mon_stock  TYPE REF TO /scwm/cl_mon_stock,
+*          lt_options    TYPE /iwbep/t_cod_select_options,
+*          lt_huident_r  TYPE /scwm/tt_huident_r,
+*          ls_huident_r  TYPE /scwm/s_huident_r,
+*          lt_stock_mon  TYPE /scwm/tt_stock_mon,
+*          ev_returncode TYPE xfeld.
+
+
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_in ).
+
+
+    "hu号码补充前导零
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = ls_in-huident
+      IMPORTING
+        output = ls_in-huident.
+
+    SELECT SINGLE hutyp
+      FROM zewmbarcode
+      WHERE hubox EQ @ls_in-huident
+      INTO @DATA(lv_hutyp).
+
+
+    "如果是托盘条码 或者 只有仓库有值
+    IF  ( ls_in-lgnum IS NOT INITIAL
+      AND ls_in-huident IS INITIAL )
+      OR lv_hutyp = 'PALLET' .
+*      OR ls_in-huident+8(1) = cn_2
+*      OR ls_in-huident+8(1) = cn_1.
+
+*      IF ls_in-huident+8(1) = cn_2
+*        OR ls_in-huident+8(1) = cn_1.
+      IF lv_hutyp = 'PALLET'.
+
+        SELECT zzbcrl_hu~hupal,zzbcrl_hu~hubox,
+        a~matnr,a~maktx,a~ebeln,
+        a~ebelp,a~aufnr,a~charg,
+        a~lifnr,a~hsdat,a~menge,a~mecap,
+        a~meins,b~mseh3,
+        zzbcrl_hu~paltyp,zzbcrl_hu~boxtyp,
+        a~mblnr,a~werks
+*        a~atwrt5,a~atwrt6,a~atwrt13
+
+        FROM zzbcrl_hu
+        LEFT JOIN zewmbarcode AS a ON a~hubox = zzbcrl_hu~hubox
+        LEFT JOIN t006a AS b ON b~msehi EQ a~meins AND b~spras EQ @sy-langu
+        "LEFT JOIN /scwm/huhdr AS c ON c~huident EQ zzbcrl_hu~hupal
+        "LEFT JOIN /scwm/huhdr AS d ON d~huident EQ zzbcrl_hu~hubox
+        "LEFT JOIN mara AS e ON e~scm_matid_guid16 EQ c~pmat_guid
+        "LEFT JOIN mara AS f ON f~scm_matid_guid16 EQ d~pmat_guid
+
+
+        WHERE zzbcrl_hu~hudel NE @abap_true
+        AND zzbcrl_hu~hupal EQ @ls_in-huident
+        INTO TABLE @DATA(lt_pb).
+
+
+
+
+        IF lt_pb IS INITIAL."散托情况
+
+          SELECT a~hubox AS hupal,a~hutyp AS paltyp,a~hunum AS hubox,
+          a~matnr,a~maktx,a~ebeln,
+          a~ebelp,a~aufnr,a~charg,
+          a~lifnr,a~hsdat,a~menge,a~mecap,
+          a~meins,b~mseh3,
+          a~mblnr
+
+
+          FROM zewmbarcode AS a
+          LEFT JOIN t006a AS b ON b~msehi EQ a~meins AND b~spras EQ @sy-langu
+
+          WHERE a~hutyp = 'PALLET'
+          AND a~hubox EQ @ls_in-huident
+          INTO  CORRESPONDING FIELDS OF TABLE @lt_pb.
+
+        ENDIF.
+
+      ELSE.
+
+        SELECT zzbcrl_hu~hupal,zzbcrl_hu~hubox,
+        a~matnr,a~maktx,a~ebeln,
+        a~ebelp,a~aufnr,a~charg,
+        a~lifnr,a~hsdat,a~menge,a~mecap,
+        a~meins,b~mseh3,
+         zzbcrl_hu~paltyp,zzbcrl_hu~boxtyp,
+        a~mblnr,a~werks
+*        a~atwrt5,a~atwrt6,a~atwrt13
+
+
+        FROM zewmbarcode AS a
+        LEFT JOIN zzbcrl_hu ON a~hubox = zzbcrl_hu~hubox
+                           AND zzbcrl_hu~hudel NE @abap_true
+        LEFT JOIN t006a AS b ON b~msehi EQ a~meins AND b~spras EQ @sy-langu
+        "LEFT JOIN /scwm/huhdr AS c ON c~huident EQ zzbcrl_hu~hupal
+        "LEFT JOIN /scwm/huhdr AS d ON d~huident EQ a~hubox
+        "LEFT JOIN mara AS e ON e~scm_matid_guid16 EQ c~pmat_guid
+        "LEFT JOIN mara AS f ON f~scm_matid_guid16 EQ d~pmat_guid
+
+        WHERE  a~lgnum EQ @ls_in-lgnum
+           AND a~hutyp = 'BOX'
+        INTO CORRESPONDING FIELDS OF TABLE @lt_pb.
+
+
+      ENDIF.
+
+      MOVE-CORRESPONDING lt_pb TO lt_box.
+
+      MOVE-CORRESPONDING lt_pb TO lt_pal.
+      SORT lt_pal BY hupal.
+      DELETE ADJACENT DUPLICATES FROM lt_pal COMPARING hupal.
+
+
+
+
+      LOOP AT lt_pal  ASSIGNING FIELD-SYMBOL(<fs_pal>).
+
+
+        READ TABLE lt_box INTO lw_box WITH KEY hupal = <fs_pal>-hupal.
+        IF sy-subrc = 0.
+          <fs_pal>-matnr = lw_box-matnr."
+          <fs_pal>-maktx = lw_box-maktx.
+          <fs_pal>-mecap = lw_box-mecap."箱容纳量
+
+        ENDIF.
+
+        MOVE-CORRESPONDING lt_pal TO lt_pal1.
+        DELETE lt_pal1 WHERE hupal <> <fs_pal>-hupal.
+
+        <fs_pal>-boxnu = lines( lt_pal1 )."箱数
+
+
+        DATA(lv_m) = NEW menge_d(  ).
+        <fs_pal>-to_nu =  REDUCE menge_d(
+        INIT i = lv_m->*
+        FOR wa IN lt_box
+        WHERE ( hupal = <fs_pal>-hupal )
+        NEXT i = i + wa-menge )."总数量
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+          EXPORTING
+            input  = <fs_pal>-hupal
+          IMPORTING
+            output = <fs_pal>-hupal.
+
+      ENDLOOP.
+
+
+
+      "如果是箱条码
+*    ELSEIF ls_in-huident+8(1) = cn_4 OR ls_in-huident+8(1) = cn_1.
+    ELSEIF lv_hutyp = 'BOX'.
+      SELECT zewmbarcode~hubox,zewmbarcode~matnr,
+             zewmbarcode~maktx,zewmbarcode~ebeln,
+             zewmbarcode~ebelp,zewmbarcode~aufnr,
+             zewmbarcode~charg,zewmbarcode~lifnr,
+             zewmbarcode~hsdat,zewmbarcode~menge,
+             zewmbarcode~meins,b~mseh3,zewmbarcode~mblnr,
+             zewmbarcode~hutyp AS boxtyp,
+             zzbcrl_hu~hupal,zzbcrl_hu~paltyp,zewmbarcode~werks
+*        zewmbarcode~atwrt5,zewmbarcode~atwrt6,zewmbarcode~atwrt13
+        FROM zewmbarcode
+        JOIN t006a AS b ON b~msehi EQ zewmbarcode~meins AND b~spras EQ @sy-langu
+        LEFT JOIN zzbcrl_hu ON zewmbarcode~hubox = zzbcrl_hu~hubox
+                           AND zzbcrl_hu~hudel NE @abap_true
+        WHERE zewmbarcode~hubox = @ls_in-huident
+        INTO CORRESPONDING FIELDS OF TABLE @lt_box.
+
+    ENDIF.
+
+
+
+
+*    ""箱条码批次特性取值 begin
+*    SELECT mch1~matnr,mch1~charg,
+*      mch1~cuobj_bm,ausp~atinn,ausp~atwrt,ausp~date_from
+*    FROM mch1
+*    INNER JOIN ausp ON ausp~objek = mch1~cuobj_bm
+*    FOR ALL ENTRIES IN @lt_box
+*    WHERE mch1~matnr = @lt_box-matnr AND mch1~charg = @lt_box-charg
+*    INTO TABLE @DATA(lt_atwrt).
+*
+*    SELECT mch1~matnr,mch1~charg,mch1~ersda
+*    FROM mch1
+*    FOR ALL ENTRIES IN @lt_box
+*    WHERE mch1~matnr = @lt_box-matnr AND mch1~charg = @lt_box-charg
+*    INTO TABLE @DATA(lt_mch1).
+**    SELECT mara~matnr,mara~mtart
+**    FROM mara
+**    FOR ALL ENTRIES IN @gt_box
+**    WHERE mara~matnr = @gt_box-matnr
+**    INTO TABLE @DATA(lt_mara).
+**    halb
+*
+*    SELECT  mch1~matnr,klah~class
+*    FROM mch1
+*    JOIN kssk ON kssk~objek = mch1~cuobj_bm
+*    JOIN klah ON klah~clint = kssk~clint
+*
+*    FOR ALL ENTRIES IN @lt_box
+*    WHERE mch1~matnr = @lt_box-matnr
+*
+*    INTO TABLE @DATA(lt_kssk).
+
+    ""可入库数量
+*
+    SELECT eket~ebeln,eket~ebelp,
+      eket~menge,eket~wemng
+      FROM eket
+      FOR ALL ENTRIES IN @lt_box
+      WHERE eket~ebeln = @lt_box-ebeln
+       AND eket~ebelp = @lt_box-ebelp
+      INTO TABLE @DATA(lt_eket).
+*
+    SELECT afpo~aufnr,afpo~matnr,
+    afpo~psmng,afpo~wemng
+    FROM afpo
+    FOR ALL ENTRIES IN @lt_box
+    WHERE afpo~aufnr = @lt_box-aufnr
+    AND afpo~matnr = @lt_box-matnr
+    INTO TABLE @DATA(lt_afpo).
+*
+    SELECT resb~ebeln,resb~ebelp,
+    resb~bdmng,resb~enmng
+    FROM resb
+    FOR ALL ENTRIES IN @lt_box
+    WHERE resb~ebeln = @lt_box-ebeln
+    AND resb~ebelp = @lt_box-ebelp
+    INTO TABLE @DATA(lt_resb1).
+*
+    SELECT resb~aufnr,resb~matnr,
+    resb~bdmng,resb~enmng
+    FROM resb
+    FOR ALL ENTRIES IN @lt_box
+    WHERE resb~aufnr = @lt_box-aufnr
+    AND resb~matnr = @lt_box-matnr
+    INTO TABLE @DATA(lt_resb2).
+
+
+    LOOP AT lt_box ASSIGNING FIELD-SYMBOL(<fs_box>)  .
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+        EXPORTING
+          input  = <fs_box>-aufnr
+        IMPORTING
+          output = <fs_box>-aufnr.
+
+      <fs_box>-hsdatj = <fs_box>-hsdat.
+
+
+
+*
+**      READ TABLE lt_mara INTO DATA(ls_mara) WITH KEY matnr = <fs_box>-matnr.
+**      IF sy-subrc = 0.
+**        <fs_box>-mtart = ls_mara-mtart.
+**      ENDIF.
+*
+**      READ TABLE lt_kssk INTO DATA(ls_kssk) WITH KEY matnr = <fs_box>-matnr .
+**      IF sy-subrc = 0.
+**        <fs_box>-class = ls_kssk-class.
+**      ENDIF.
+*
+*      READ TABLE lt_atwrt INTO DATA(ls_atwrt1) WITH KEY matnr = <fs_box>-matnr
+*            charg = <fs_box>-charg
+*            atinn = 0000000854."BAK批次.
+*      IF sy-subrc = 0 AND ls_atwrt1-atwrt <> space.
+*        <fs_box>-atwrt1 = ls_atwrt1-atwrt.
+*
+*      ENDIF.
+*      READ TABLE lt_atwrt INTO DATA(ls_atwrt2) WITH KEY matnr = <fs_box>-matnr
+*            charg = <fs_box>-charg
+*            atinn = 0000000857."等级.
+*      IF sy-subrc = 0 AND ls_atwrt2-atwrt <> space.
+*        <fs_box>-atwrt2 = ls_atwrt2-atwrt.
+*
+*      ENDIF.
+*      READ TABLE lt_atwrt INTO DATA(ls_atwrt3) WITH KEY matnr = <fs_box>-matnr
+*            charg = <fs_box>-charg
+*            atinn = 0000000856."型号.
+*      IF sy-subrc = 0 AND ls_atwrt3-atwrt <> space.
+*        <fs_box>-atwrt3 = ls_atwrt3-atwrt.
+*
+*      ENDIF.
+*
+*      READ TABLE lt_mch1 INTO DATA(ls_mch1) WITH KEY matnr = <fs_box>-matnr
+*                                                     charg = <fs_box>-charg.
+*      IF sy-subrc = 0.
+*        <fs_box>-atwrt4 = ls_mch1-ersda.
+*      ENDIF.
+*
+*      READ TABLE lt_atwrt INTO DATA(ls_atwrt7) WITH KEY matnr = <fs_box>-matnr
+*            charg = <fs_box>-charg
+*            atinn = 0000000823."BAC批次2.
+*      IF sy-subrc = 0 AND ls_atwrt7-atwrt <> space.
+*        <fs_box>-atwrt7 = ls_atwrt7-atwrt.
+*        <fs_box>-atwrt1 = ls_atwrt7-atwrt.
+*
+*      ENDIF.
+*      READ TABLE lt_atwrt INTO DATA(ls_atwrt8) WITH KEY matnr = <fs_box>-matnr
+*            charg = <fs_box>-charg
+*            atinn = 0000000826."等级2.
+*
+*      IF sy-subrc = 0 AND ls_atwrt8-atwrt <> space.
+*        <fs_box>-atwrt8 = ls_atwrt8-atwrt.
+*
+*      ENDIF.
+*
+*      READ TABLE lt_atwrt INTO DATA(ls_atwrt9) WITH KEY matnr = <fs_box>-matnr
+*            charg = <fs_box>-charg
+*            atinn = 0000000839."级别2.
+*      IF sy-subrc = 0 AND ls_atwrt9-atwrt <> space.
+*        <fs_box>-atwrt9 = ls_atwrt9-atwrt.
+*
+*      ENDIF.
+*      READ TABLE lt_atwrt INTO DATA(ls_atwrt10) WITH KEY matnr = <fs_box>-matnr
+*            charg = <fs_box>-charg
+*            atinn = 0000000832."分容日期2.
+*      IF sy-subrc = 0 AND ls_atwrt10-atwrt <> space.
+*        <fs_box>-atwrt10 = ls_atwrt10-date_from.
+*
+*      ENDIF.
+*      READ TABLE lt_atwrt INTO DATA(ls_atwrt11) WITH KEY matnr = <fs_box>-matnr
+*            charg = <fs_box>-charg
+*            atinn = 0000000825."体系2.
+*      IF sy-subrc = 0 AND ls_atwrt11-atwrt <> space.
+*        <fs_box>-atwrt11 = ls_atwrt11-atwrt.
+*
+*      ENDIF.
+*      READ TABLE lt_atwrt INTO DATA(ls_atwrt12) WITH KEY matnr = <fs_box>-matnr
+*            charg = <fs_box>-charg
+*            atinn = 0000000833."单独2.
+*      IF sy-subrc = 0 AND ls_atwrt12-atwrt <> space.
+*        <fs_box>-atwrt12 = ls_atwrt12-atwrt.
+*
+*      ENDIF.
+*
+*
+      IF <fs_box>-ebeln IS NOT INITIAL
+        AND <fs_box>-ebelp IS NOT INITIAL .
+
+        LOOP AT lt_eket INTO DATA(ls_eket)
+          WHERE ebeln = <fs_box>-ebeln
+            AND ebelp = <fs_box>-ebelp.
+          <fs_box>-k_menge = <fs_box>-k_menge
+                            + ls_eket-menge
+                            - ls_eket-wemng.
+        ENDLOOP.
+
+        IF sy-subrc <> 0.
+
+          LOOP AT lt_resb1 INTO DATA(ls_resb1)
+                WHERE ebeln = <fs_box>-ebeln
+                AND ebelp = <fs_box>-ebelp.
+            <fs_box>-k_menge = <fs_box>-k_menge
+            + ls_resb1-bdmng
+            - ls_resb1-enmng.
+          ENDLOOP.
+
+        ENDIF.
+
+
+
+      ELSEIF  <fs_box>-aufnr IS NOT INITIAL.
+        READ TABLE lt_afpo INTO DATA(ls_afpo) WITH KEY aufnr = <fs_box>-aufnr.
+        IF sy-subrc = 0.
+          <fs_box>-k_menge = ls_afpo-psmng - ls_afpo-wemng.
+
+        ELSE.
+          LOOP AT lt_resb2 INTO DATA(ls_resb2)
+                WHERE aufnr = <fs_box>-aufnr
+                AND matnr = <fs_box>-matnr.
+            <fs_box>-k_menge = <fs_box>-k_menge
+            + ls_resb2-bdmng
+            - ls_resb2-enmng.
+          ENDLOOP.
+        ENDIF.
+
+      ENDIF.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+        EXPORTING
+          input  = <fs_box>-hubox
+        IMPORTING
+          output = <fs_box>-hubox.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+        EXPORTING
+          input  = <fs_box>-hupal
+        IMPORTING
+          output = <fs_box>-hupal.
+
+*
+    ENDLOOP.
+
+*    ""箱条码批次特性取值 可入库数量 end
+    CLEAR gs_msg.
+    IF ls_in-huident IS NOT INITIAL
+      AND lt_pal IS INITIAL
+      AND lt_box IS INITIAL.
+
+********自定义表没有HU信息的，到SCM查 ADD BY VICKY 29.11.2019 15:15:09
+
+      DATA it_box TYPE TABLE OF zewms004.
+      DATA it_pal TYPE TABLE OF zewms002.
+
+      CALL FUNCTION 'ZFM_SCM_HU_MESSAGE'
+        EXPORTING
+          lv_huident = ls_in-huident
+        TABLES
+          et_box     = it_box
+          et_pal     = it_pal.
+
+      IF it_box IS INITIAL
+        AND it_pal IS INITIAL.
+
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = 'HU不存在！'.
+
+      ELSE.
+        MOVE-CORRESPONDING it_box TO lt_box.
+        MOVE-CORRESPONDING it_pal TO lt_pal.
+      ENDIF.
+*********
+
+    ENDIF.
+
+    IF ls_in-huident IS INITIAL
+      AND ls_in-lgnum IS NOT INITIAL
+      AND lt_pal IS INITIAL
+      AND lt_box IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '仓库下不存在HU！'.
+
+    ENDIF.
+
+*    LOOP AT lt_box ASSIGNING <fs_box>.
+
+*      SELECT SINGLE vfdat INTO @<fs_box>-vfdat
+*      FROM mch1
+*     WHERE matnr = @<fs_box>-matnr
+*      AND charg = @<fs_box>-charg.
+*
+*      SELECT SINGLE ddtext INTO <fs_box>-zjy_text
+*        FROM qave AS a
+*         INNER JOIN qals AS b ON a~prueflos = b~prueflos
+*         INNER JOIN dd07t AS c ON a~vbewertung = c~domvalue_l
+*       WHERE b~matnr = <fs_box>-matnr
+*        AND  b~charg = <fs_box>-charg
+*        AND c~ddlanguage = sy-langu
+*        AND c~domname = 'QBEWERTUNG'.
+*      IF sy-subrc NE 0.
+*        <fs_box>-zjy_text = '没有评估'.
+*      ENDIF.
+*
+** 库存状态
+*      CLEAR: lo_mon_stock,
+*             lt_huident_r,
+*             lt_stock_mon,
+*             ev_returncode.
+*
+*      CREATE OBJECT lo_mon_stock
+*        EXPORTING
+*          iv_lgnum = ls_in-lgnum.
+*
+*      ls_huident_r-low = <fs_box>-hubox.
+*      CALL FUNCTION 'CONVERSION_EXIT_HUID_INPUT'
+*        EXPORTING
+*          input  = ls_huident_r-low
+*        IMPORTING
+*          output = ls_huident_r-low.
+*
+*      ls_huident_r-sign = 'I'.
+*      ls_huident_r-option = 'EQ'.
+*      APPEND ls_huident_r TO lt_huident_r.
+*      CLEAR: ls_huident_r.
+*
+*      CALL METHOD lo_mon_stock->get_physical_stock
+*        EXPORTING
+*          iv_drill_down = abap_false
+*          it_huident_r  = lt_huident_r
+*        IMPORTING
+*          et_stock_mon  = lt_stock_mon
+*          ev_error      = ev_returncode.
+*
+*      READ TABLE lt_stock_mon INTO DATA(ls_mon) INDEX 1.
+*      IF sy-subrc = 0.
+*        CASE ls_mon-cat+0(1).
+*          WHEN '0'.
+*            <fs_box>-cat_text = '非限制'.
+*          WHEN '1'.
+*            <fs_box>-cat_text = '质检中'.
+*          WHEN '2'.
+*            <fs_box>-cat_text = '已冻结'.
+*        ENDCASE.
+*      ENDIF.
+
+*    ENDLOOP.
+
+    ev_json = /ui2/cl_json=>serialize( lt_pal ).
+    DATA(json1) = ev_json.
+
+    ev_json = /ui2/cl_json=>serialize( lt_box ).
+    DATA(json2) = ev_json.
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+    DATA(json3) = ev_json.
+
+    CONCATENATE '{"PALLET":' json1 ',"BOX":' json2 ',"MESSAGE": ' json3 '}' INTO ev_json.
+    CLEAR:json1,json2,json3.
+
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

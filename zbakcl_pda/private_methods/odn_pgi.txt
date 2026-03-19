@@ -1,0 +1,97 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD odn_pgi.
+
+
+    DATA:BEGIN OF ls_data,
+           lgnum TYPE /scwm/lgnum,
+           vbeln TYPE lips-vbeln,
+           uname TYPE uname, ""ADD BY VICKY 09.06.2021 09:11:42
+         END OF ls_data.
+
+    DATA lt_return TYPE /scdl/dm_message_tab.
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    DATA gt_msg LIKE TABLE OF gs_msg.
+
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_data ).
+
+
+    IF ls_data IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+
+
+    ls_data-vbeln = |{ ls_data-vbeln ALPHA = IN }|.
+
+    SELECT SINGLE a~docid,b~doccat,b~doctype
+     INTO @DATA(ls_proci)
+     FROM /scdl/db_refdoc AS a
+     JOIN /scdl/db_proch_o AS b ON a~docid EQ b~docid
+    WHERE a~refdocno EQ @ls_data-vbeln
+      AND a~refdoccat EQ 'ERP'.
+    TRANSLATE ls_data-uname TO UPPER CASE.
+    ""ADD BY VICKY 07.06.2021 15:42:37
+
+    SELECT SINGLE ENTITLED INTO @DATA(ls_ENTITLED)
+      FROM /SCDL/DB_PROCI_O
+      WHERE DOCID = @ls_proci-docid.
+
+*{   REPLACE        SBXK900051                                        1
+*\    AUTHORITY-CHECK OBJECT '/SCWM/DLV'
+*\    FOR USER ls_data-uname
+*\    ID 'ACTVT' FIELD '02'
+*\    ID '/SCWM/ENTL' FIELD  ls_ENTITLED .
+    AUTHORITY-CHECK OBJECT '/SCWM/DLV2'
+    FOR USER ls_data-uname
+    ID 'ACTVT' FIELD '02'
+    ID '/SCWM/ENTL' FIELD  ls_ENTITLED .
+*}   REPLACE
+
+    IF sy-subrc <> 0.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '授权处理方&活动' && ls_ENTITLED && '&02更改无权限'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    CALL FUNCTION 'ZEWM_POST_GM'
+      EXPORTING
+        ip_docid  = ls_proci-docid
+        ip_doccat = ls_proci-doccat
+        ip_lgnum  = ls_data-lgnum
+        iv_gmcat  = /scwm/if_docflow_c=>sc_gi
+      IMPORTING
+        ep_mes    = lt_return.
+
+    IF NOT line_exists( lt_return[ msgty = 'E' ] )
+    AND NOT line_exists( lt_return[ msgty = 'A' ] ) .
+
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '发货过账成功！'.
+    ELSE.
+
+      DATA(ls_ret) = lt_return[ msgty = 'E' ].
+      MESSAGE ID ls_ret-msgid TYPE ls_ret-msgty NUMBER ls_ret-msgno
+              INTO DATA(mtext)
+              WITH ls_ret-msgv1 ls_ret-msgv2 ls_ret-msgv3 ls_ret-msgv4.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '发货过账失败，原因：' && mtext.
+    ENDIF.
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

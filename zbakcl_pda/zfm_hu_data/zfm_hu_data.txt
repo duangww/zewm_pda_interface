@@ -1,0 +1,95 @@
+FUNCTION zfm_hu_data.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(IV_LGNUM) TYPE  /SCWM/LGNUM DEFAULT 1100
+*"  TABLES
+*"      CT_HUDATA STRUCTURE  ZEWMS_HU
+*"----------------------------------------------------------------------
+
+  DATA: lv_huident TYPE /scwm/de_huident.
+
+  DATA: lo_mon_stock  TYPE REF TO /scwm/cl_mon_stock,
+        lt_options    TYPE /iwbep/t_cod_select_options,
+        lt_huident_r  TYPE /scwm/tt_huident_r,
+        ls_huident_r  TYPE /scwm/s_huident_r,
+        lt_stock_mon  TYPE /scwm/tt_stock_mon,
+        ev_returncode TYPE xfeld.
+
+  LOOP AT ct_hudata ASSIGNING FIELD-SYMBOL(<fs_hu>).
+
+    CLEAR: lv_huident,
+           lo_mon_stock,
+           lt_huident_r,
+           lt_stock_mon,
+           ev_returncode.
+
+    IF <fs_hu>-boxtyp = 'BOX'.
+      lv_huident = <fs_hu>-hubox.
+    ELSE.
+      lv_huident = <fs_hu>-hupal.
+    ENDIF.
+
+    CREATE OBJECT lo_mon_stock
+      EXPORTING
+        iv_lgnum = iv_lgnum.
+
+
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = lv_huident
+      IMPORTING
+        output = lv_huident.
+
+    ls_huident_r-low = lv_huident.
+    ls_huident_r-sign = 'I'.
+    ls_huident_r-option = 'EQ'.
+    APPEND ls_huident_r TO lt_huident_r.
+    CLEAR: ls_huident_r.
+
+
+    CALL METHOD lo_mon_stock->get_physical_stock
+      EXPORTING
+        iv_drill_down = abap_false
+        it_huident_r  = lt_huident_r
+      IMPORTING
+        et_stock_mon  = lt_stock_mon
+        ev_error      = ev_returncode.
+
+    READ TABLE lt_stock_mon INTO DATA(ls_mon) INDEX 1.
+    IF sy-subrc = 0.
+      CASE ls_mon-cat+0(1).
+        WHEN '0'.
+          <fs_hu>-cat_text = '非限制'.
+        WHEN '1'.
+          <fs_hu>-cat_text = '质检中'.
+        WHEN '2'.
+          <fs_hu>-cat_text = '已冻结'.
+      ENDCASE.
+    ENDIF.
+
+
+    SELECT ddtext INTO <fs_hu>-zjy_text
+      FROM qave AS a
+       INNER JOIN qals AS b ON a~prueflos = b~prueflos
+       INNER JOIN dd07t AS c ON a~vbewertung = c~domvalue_l
+     WHERE b~matnr = <fs_hu>-matnr
+      AND  b~charg = <fs_hu>-charg
+      AND c~ddlanguage = sy-langu
+      AND c~domname = 'QBEWERTUNG'
+     ORDER BY vdatum DESCENDING vezeiterf DESCENDING.   "取检验批记录最新的1条
+
+      EXIT.
+    ENDSELECT.
+    IF <fs_hu>-zjy_text IS INITIAL.
+      <fs_hu>-zjy_text = '没有评估'.
+    ENDIF.
+
+
+  ENDLOOP.
+
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

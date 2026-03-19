@@ -1,0 +1,251 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD query_charg.
+
+    TYPES:BEGIN OF ls_mch1,
+            charg TYPE mch1-charg,
+            matnr TYPE mch1-matnr,
+          END OF ls_mch1.
+    DATA:lt_mch1 TYPE TABLE OF ls_mch1,
+         wa_mchl TYPE ls_mch1.
+
+    DATA:s_charg TYPE RANGE OF mch1-charg.
+    DATA:w_charg LIKE LINE OF s_charg.
+    DATA:s_matnr TYPE RANGE OF mch1-matnr.
+    DATA:w_matnr LIKE LINE OF s_matnr.
+
+    TYPES:BEGIN OF ly_itab,
+            charg TYPE mch1-charg,
+            matnr TYPE mch1-matnr,
+            objek TYPE ausp-objek,
+            atwrt TYPE ausp-atwrt,
+            atbez TYPE cabnt-atbez,
+          END OF ly_itab.
+    DATA:lt_itab TYPE TABLE OF ly_itab,
+         wa_itab TYPE ly_itab.
+    DATA: lv_klart TYPE  klassenart,
+          lv_class TYPE  klasse_d,
+          lv_objek TYPE cuobn,
+          lv_obtab TYPE tabelle.
+    DATA: lv_classnum  TYPE  bapi1003_key-classnum,
+          lv_classtype TYPE  bapi1003_key-classtype,
+          lt_class     TYPE TABLE OF bapi1003_charact_r,
+          wa_class     TYPE bapi1003_charact_r.
+
+**********************************************************************
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_mch1[] ).
+
+
+    LOOP AT lt_mch1 INTO wa_itab.
+      w_charg-sign   = 'I'.
+      w_charg-option = 'EQ'.
+      w_charg-low = wa_itab-charg .
+      APPEND w_charg TO s_charg.
+      CLEAR w_charg.
+
+      w_matnr-sign   = 'I'.
+      w_matnr-option = 'EQ'.
+      w_matnr-low = wa_itab-matnr .
+      APPEND w_matnr TO s_matnr.
+      CLEAR w_matnr.
+    ENDLOOP.
+
+**  查询物料信息
+    SELECT mch1~charg,mch1~matnr,mch1~cuobj_bm,makt~maktx FROM mch1
+      INNER JOIN makt ON makt~matnr = mch1~matnr
+      WHERE mch1~charg IN @s_charg
+      AND   mch1~matnr IN @s_matnr
+      AND   makt~spras = @sy-langu
+      INTO TABLE @DATA(lt_itab1).
+
+    ev_json = /ui2/cl_json=>serialize( lt_itab1[] ).
+
+    DATA(json1) = ev_json.
+*
+**  查询特征值信息
+*
+*    LOOP AT LT_ITAB1 INTO DATA(WA_ITAB1).
+*
+*      CALL FUNCTION 'VB_BATCH_2_CLASS_OBJECT'
+*        EXPORTING
+*          I_MATNR = WA_ITAB1-MATNR
+*          I_CHARG = WA_ITAB1-CHARG
+**         I_WERKS =
+*        IMPORTING
+*          E_KLART = LV_KLART
+*          E_CLASS = LV_CLASS
+*          E_OBJEK = LV_OBJEK
+*          E_OBTAB = LV_OBTAB.
+*
+*      LV_CLASSNUM      = LV_CLASS.
+*      LV_CLASSTYPE     = LV_KLART.
+*
+*      CALL FUNCTION 'BAPI_CLASS_GETDETAIL'
+*        EXPORTING
+*          CLASSTYPE            = LV_CLASSTYPE
+*          CLASSNUM             = LV_CLASSNUM
+*        TABLES
+*          CLASSCHARACTERISTICS = LT_CLASS[].
+*    ENDLOOP.
+
+
+
+* 字段CUOBJ_BM需要查询前补零查询AUSP-OBJEK
+    LOOP AT lt_itab1 INTO DATA(wa_itab1).
+
+      CALL FUNCTION 'VB_BATCH_2_CLASS_OBJECT'
+        EXPORTING
+          i_matnr = wa_itab1-matnr
+          i_charg = wa_itab1-charg
+*         I_WERKS =
+        IMPORTING
+          e_klart = lv_klart
+          e_class = lv_class
+          e_objek = lv_objek
+          e_obtab = lv_obtab.
+
+*---------------add by AlanWang-----29.10.2020 16:44:29------------------------------------
+*
+      SELECT l~clint,h~klart,h~class,imerk,c~atbez
+*        p~atwrt,p~atflv,p~date_from
+        FROM klah AS h
+        INNER JOIN ksml AS l ON l~clint = h~clint
+        LEFT JOIN cabnt AS c ON c~atinn = l~imerk AND spras = @sy-langu
+*        LEFT JOIN ausp AS p ON p~atinn = l~imerk AND p~klart = h~klart
+        WHERE h~klart = @lv_klart AND h~class = @lv_class
+        INTO TABLE @DATA(lt_ksml).
+
+*-------------------------end-------29.10.2020 16:44:29------------------------------------
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = wa_itab1-cuobj_bm
+        IMPORTING
+          output = wa_itab1-cuobj_bm.
+      DATA:p_num TYPE char20.
+
+      SELECT atwrt,atinn,objek,atflv,date_from FROM ausp
+        WHERE objek = @wa_itab1-cuobj_bm
+        INTO TABLE @DATA(lt_ausp).
+
+      LOOP AT lt_ksml INTO DATA(lw_ksml).
+        wa_itab-charg = wa_itab1-charg.
+        wa_itab-matnr = wa_itab1-matnr.
+        wa_itab-atbez = lw_ksml-atbez.
+        wa_itab-objek = wa_itab1-cuobj_bm.
+
+        READ TABLE lt_ausp INTO DATA(wa_ausp) WITH KEY atinn = lw_ksml-imerk.
+        IF sy-subrc = 0.
+          IF wa_ausp-atwrt IS INITIAL AND wa_ausp-atflv IS INITIAL.
+            DELETE lt_ausp INDEX sy-tabix.
+            CONTINUE.
+          ENDIF.
+          wa_itab-atwrt = wa_ausp-atwrt.
+          IF wa_itab-atwrt IS INITIAL.
+            wa_itab-atwrt = wa_ausp-date_from.
+          ELSE.
+            wa_itab-atwrt = wa_ausp-atwrt.
+          ENDIF.
+        ENDIF.
+        APPEND wa_itab TO lt_itab.
+        CLEAR wa_itab.
+      ENDLOOP.
+
+
+* 增加库存状态和检验结果
+      wa_itab-charg = wa_itab1-charg.
+      wa_itab-matnr = wa_itab1-matnr.
+      wa_itab-atbez = lw_ksml-atbez.
+      wa_itab-objek = wa_itab1-cuobj_bm.
+      SELECT ddtext INTO wa_itab-atwrt
+           FROM qave AS a
+            INNER JOIN qals AS b ON a~prueflos = b~prueflos
+            INNER JOIN dd07t AS c ON a~vbewertung = c~domvalue_l
+          WHERE b~matnr = wa_itab1-matnr
+           AND  b~charg = wa_itab1-charg
+           AND c~ddlanguage = sy-langu
+           AND c~domname = 'QBEWERTUNG'
+          ORDER BY vdatum DESCENDING vezeiterf DESCENDING.   "取检验批记录最新的1条
+
+        EXIT.
+      ENDSELECT.
+      IF wa_itab-atwrt IS INITIAL.
+        wa_itab-atwrt = '没有评估'.
+      ENDIF.
+      wa_itab-atbez = '检验结果'.
+      APPEND wa_itab TO lt_itab.
+      CLEAR: wa_itab-atwrt,wa_itab-atbez.
+
+      SELECT a~matnr,b~maktx,a~charg,werks,lgort,
+             a~clabs,a~cinsm,a~cspem
+        INTO TABLE @DATA(lt_mchb)
+        FROM mchb AS a
+        LEFT JOIN makt AS b
+        ON a~matnr = b~matnr
+       WHERE charg = @wa_itab-charg
+        AND a~matnr = @wa_itab-matnr
+        AND  b~spras = @sy-langu
+        AND  ( clabs > 0 OR cinsm > 0 OR cspem > 0 ).
+
+      LOOP AT lt_mchb INTO DATA(ls_mchb).
+        IF ls_mchb-clabs IS NOT INITIAL.
+          wa_itab-atwrt = '非限制'.
+        ELSEIF ls_mchb-cinsm IS NOT INITIAL.
+          wa_itab-atwrt = '质检中'.
+        ELSEIF ls_mchb-cspem IS NOT INITIAL.
+          wa_itab-atwrt = '已冻结'.
+        ENDIF.
+        CLEAR: ls_mchb.
+      ENDLOOP.
+
+      wa_itab-atbez = '库存状态'.
+      APPEND wa_itab TO lt_itab.
+      CLEAR: wa_itab-atwrt,wa_itab-atbez,lt_mchb.
+
+
+
+*      LOOP AT lt_ausp INTO DATA(wa_ausp).
+*        IF wa_ausp-atwrt IS INITIAL AND wa_ausp-atflv IS INITIAL.
+*          DELETE lt_ausp INDEX sy-tabix.
+*          CONTINUE.
+*        ENDIF.
+*        SELECT SINGLE atbez FROM cabnt INTO wa_itab-atbez
+*          WHERE atinn = wa_ausp-atinn
+*          AND   spras = sy-langu.
+*        wa_itab-charg = wa_itab1-charg.
+*        wa_itab-matnr = wa_itab1-matnr.
+*        wa_itab-objek = wa_ausp-objek.
+*        wa_itab-atwrt = wa_ausp-atwrt.
+*
+*        IF wa_itab-atwrt IS INITIAL.
+*          wa_itab-atwrt = wa_ausp-date_from.
+*        ELSE.
+*          wa_itab-atwrt = wa_ausp-atwrt.
+*        ENDIF.
+*
+*        APPEND wa_itab TO lt_itab.
+*        CLEAR wa_itab.
+*      ENDLOOP.
+
+      CLEAR: wa_itab1.
+    ENDLOOP.
+
+    ev_json = /ui2/cl_json=>serialize( lt_itab[] ).
+    DATA(json2) = ev_json.
+
+    CONCATENATE '{"MATERIEL":' json1 ',"CAHARVALUE":' json2 '}' INTO ev_json.
+
+
+    REFRESH:lt_mch1,s_matnr,s_charg,lt_itab1,lt_itab.
+    CLEAR:json1,json2.
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

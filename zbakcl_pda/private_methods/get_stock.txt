@@ -1,0 +1,112 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD get_stock.
+    TYPES:BEGIN OF ty_in,
+            matnr TYPE mchb-matnr,
+            werks TYPE mchb-werks,
+            lgort TYPE mchb-lgort,
+            charg TYPE mchb-charg,
+          END OF ty_in.
+
+    DATA ls_in TYPE ty_in.
+
+    DATA rt_werks TYPE range_t_werks.
+    DATA rt_matnr TYPE range_t_matnr.
+    DATA rt_lgort TYPE ranges_lgort_tt.
+    DATA rt_charg TYPE ranges_charg_tt.
+
+    TYPES: BEGIN OF ty_out,
+             matnr TYPE mchb-matnr,
+             maktx TYPE makt-maktx,
+             werks TYPE mchb-werks,
+             charg TYPE mchb-charg,
+             lgort TYPE mchb-lgort,
+             lgobe TYPE t001l-lgobe,
+             clabs TYPE mchb-clabs,
+             meins TYPE mara-meins,
+           END OF ty_out.
+
+    DATA lt_out TYPE TABLE OF ty_out.
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+
+    /ui2/cl_json=>deserialize(
+       EXPORTING json = lv_cdata CHANGING data = ls_in ).
+
+
+    IF ls_in-werks IS NOT INITIAL.
+      rt_werks = VALUE #( (  sign = 'I' option = 'EQ'  low = ls_in-werks ) ).
+    ENDIF.
+
+    IF ls_in-matnr IS NOT INITIAL.
+      IF ls_in-matnr CS '*'.
+        rt_matnr = VALUE #( (  sign = 'I' option = 'CP'  low = ls_in-matnr ) ).
+      ELSE.
+        rt_matnr = VALUE #( (  sign = 'I' option = 'EQ'  low = ls_in-matnr ) ).
+      ENDIF.
+
+    ENDIF.
+
+    IF ls_in-lgort IS NOT INITIAL.
+      rt_lgort = VALUE #( (  sign = 'I' option = 'EQ'  low = ls_in-lgort ) ).
+    ENDIF.
+
+    IF ls_in-charg IS NOT INITIAL.
+      rt_charg = VALUE #( (  sign = 'I' option = 'EQ'  low = ls_in-charg ) ).
+    ENDIF.
+
+    SELECT mchb~*,makt~maktx,mara~meins
+       INTO CORRESPONDING FIELDS OF TABLE @lt_out
+      FROM mchb
+      INNER JOIN mara
+      ON mchb~matnr = mara~matnr
+      LEFT JOIN makt
+      ON mchb~matnr = makt~matnr
+     WHERE werks IN @rt_werks
+      AND  lgort IN @rt_lgort
+      AND  mchb~matnr IN @rt_matnr
+      AND  charg IN @rt_charg
+      AND  clabs <> 0
+      AND makt~spras = @sy-langu.
+
+    IF lt_out[] IS NOT INITIAL.
+      SELECT werks,lgort,lgobe
+        INTO TABLE @DATA(lt_t001l)
+        FROM t001l
+        FOR ALL ENTRIES IN @lt_out
+       WHERE werks = @lt_out-werks
+        AND lgort = @lt_out-lgort.
+      SORT lt_t001l BY werks lgort.
+    ENDIF.
+
+    LOOP AT lt_out ASSIGNING FIELD-SYMBOL(<fs_out>).
+      READ TABLE lt_t001l INTO DATA(ls_t001l) WITH KEY werks = <fs_out>-werks
+                                                       lgort = <fs_out>-lgort
+                                             BINARY SEARCH.
+      IF sy-subrc = 0.
+        <fs_out>-lgobe = ls_t001l-lgobe.
+      ENDIF.
+      CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+        EXPORTING
+          input          = <fs_out>-meins
+        IMPORTING
+          output         = <fs_out>-meins
+        EXCEPTIONS
+          unit_not_found = 1
+          OTHERS         = 2.
+    ENDLOOP.
+
+    ev_json = /ui2/cl_json=>serialize(
+                data             = lt_out
+               pretty_name      =  /ui2/cl_json=>pretty_mode-camel_case
+              ).
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

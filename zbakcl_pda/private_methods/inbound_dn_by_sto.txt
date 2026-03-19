@@ -1,0 +1,424 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD inbound_dn_by_sto.
+
+*----流程----------------*
+    "先调用migo BAPI对ODN（外向交货单）进行109收货
+    "根据传入的数据做311产生IDN(内向交货单)
+    "根据IDN调用打包收货FM进行打包 如有错误则自动删除IDN，且冲销ODN的109
+    "如以上流程全部成功，则生成检验批
+
+    DATA ls_data TYPE zewms004.
+    DATA lt_data TYPE TABLE OF zewms004.
+    DATA lv_vbeln TYPE vbeln_vl.
+    DATA ls_ghead TYPE bapi2017_gm_head_01.
+    DATA ls_gcode TYPE bapi2017_gm_code.
+    DATA ev_mblnr TYPE  bapi2017_gm_head_ret-mat_doc.
+    DATA ev_mjahr TYPE  bapi2017_gm_head_ret-doc_year.
+    DATA lw_gitem TYPE bapi2017_gm_item_create.
+    DATA lt_gitem TYPE TABLE OF bapi2017_gm_item_create .
+    DATA lt_return TYPE TABLE OF  bapiret2 .
+    DATA lt_cancel TYPE TABLE OF  bapiret2 .
+
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+
+
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+    REPLACE ALL OCCURRENCES OF '"data":'  IN lv_cdata WITH space.
+    SHIFT lv_cdata LEFT DELETING LEADING '{'.
+    SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_data ).
+
+
+    IF lt_data IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_data INTO ls_data.
+*----ADD by leo AT 08.08.2021 16:57:15  begin-----------*
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = ls_data-vbeln
+        IMPORTING
+          output = ls_data-vbeln.
+      SELECT SINGLE werks INTO ls_data-werks
+         FROM likp WHERE vbeln = ls_data-vbeln.
+      TRANSLATE ls_data-uname TO UPPER CASE.
+      TRANSLATE ls_data-werks TO UPPER CASE.
+      TRANSLATE ls_data-lgort TO UPPER CASE.
+      AUTHORITY-CHECK OBJECT 'M_MSEG_LGO'
+      FOR USER ls_data-uname
+       ID 'WERKS' FIELD ls_data-werks
+       ID 'LGORT' FIELD ls_data-lgort.
+      IF sy-subrc <> 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '工厂' && ls_data-werks
+                              && '库存地点' && ls_data-lgort
+                              && '无权限'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+*----add by leo at 08.08.2021 16:57:15 end-----------*
+
+      ls_data-vbeln = |{ ls_data-vbeln ALPHA = IN }|.
+
+      ""读取SD DN数据
+      SELECT SINGLE meinh
+        FROM marm
+        INTO ls_data-pg_unit
+        WHERE matnr EQ ls_data-matnr
+          AND ty2tq EQ cn_b.
+
+      ls_data-dn_item = 10.
+
+      TRANSLATE ls_data-lgort TO UPPER CASE.
+
+      MODIFY lt_data FROM ls_data TRANSPORTING vbeln pg_unit dn_item lgort.
+    ENDLOOP.
+
+    DATA(lt_check) = lt_data.
+    SORT lt_check BY vbeln dn_item.
+    DELETE ADJACENT DUPLICATES FROM lt_check COMPARING vbeln dn_item.
+    IF lines( lt_check ) NE 1.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '一次只能处理一个交货单一个行项目！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    SELECT *
+      FROM lips
+      INTO TABLE @DATA(lt_lips)
+      WHERE vbeln EQ @ls_data-vbeln.
+
+    IF sy-subrc NE 0.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '系统找不到此交货单！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+*----ADD by vicky AT 24.04.2021 14:18:59  begin-----------*
+    SELECT SINGLE b~werks
+      FROM lips AS a
+      JOIN ekpo AS b ON b~ebeln EQ a~vgbel AND substring( a~vgpos,2,5 )  EQ  b~ebelp
+      WHERE a~vbeln EQ @ls_data-vbeln
+      AND a~posnr EQ @ls_data-dn_item
+      INTO @DATA(lv_werks).
+    IF sy-subrc NE 0.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '系统找不到此交货单项目对应PO的工厂！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+*----add by vicky at 24.04.2021 14:18:59 end-----------*
+
+    ""汇总处理
+    ls_data-menge = REDUCE #( INIT x TYPE menge_d
+    FOR lw_data IN lt_data
+    NEXT x = x + lw_data-menge ).
+
+
+    ""先做109
+
+    ""数量超出则报错
+    SELECT SINGLE SUM( menge )
+      FROM matdoc
+      INTO @DATA(lv_menge)
+      WHERE vbeln_im = @ls_data-vbeln
+        AND bwart EQ 'Z09'
+        AND cancelled NE @abap_true
+        AND shkzg EQ @cn_shkzg.
+
+    IF REDUCE #( INIT x TYPE menge_d
+      FOR lw_lips
+      IN lt_lips
+      NEXT x = x + lw_lips-lfimg ) - lv_menge < ls_data-menge.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '本次提交总数超过了交货单剩余未作收货过账数量！请检查'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+
+    ""把数量汇总后再分摊到ITEM 做109
+    ls_gcode-gm_code = '01'.
+
+
+    LOOP AT lt_lips INTO DATA(ls_lips).
+
+      SELECT SINGLE SUM( menge )
+        FROM matdoc
+        INTO @lv_menge
+        WHERE vbeln_im = @ls_lips-vbeln
+          AND vbelp_im = @ls_lips-posnr
+          AND bwart EQ 'Z09'
+          AND cancelled NE @abap_true
+          AND shkzg EQ @cn_shkzg.
+
+      ls_lips-lfimg = ls_lips-lfimg - lv_menge.
+
+      IF ls_lips-lfimg <= 0.
+        CONTINUE.
+      ENDIF.
+
+
+      CLEAR lw_gitem.
+
+      lw_gitem-move_type  = 'Z09'.
+      lw_gitem-mvt_ind    = 'B'.
+      lw_gitem-deliv_numb    = ls_lips-vbeln.
+      lw_gitem-deliv_item    = ls_lips-posnr.
+      lw_gitem-deliv_numb_to_search    = ls_lips-vbeln.
+      lw_gitem-deliv_item_to_search    = ls_lips-posnr.
+      lw_gitem-material_long   = ls_lips-matnr."物料
+      IF ls_lips-lfimg < ls_data-menge.
+        lw_gitem-entry_qnt  = ls_lips-lfimg."数量
+        ls_data-menge = ls_data-menge - ls_lips-lfimg.
+      ELSE.
+        lw_gitem-entry_qnt  = ls_data-menge."数量
+        ls_data-menge = 0.
+      ENDIF.
+
+      lw_gitem-entry_uom  = ls_data-meins."单位
+      lw_gitem-stge_loc   = cn_lgort_109."库存地点
+      IF ls_lips-charg = ''.
+        lw_gitem-prod_date  = ls_data-hsdat.
+      ENDIF.
+      lw_gitem-batch = ls_lips-charg.
+
+*------------add by yakir at 01.02.2021 16:58:49------begin--*
+      ""get 107 doc
+      SELECT SINGLE mjahr,mblnr,zeile
+        FROM matdoc
+        INTO (@lw_gitem-ref_doc_yr,@lw_gitem-ref_doc,@lw_gitem-ref_doc_it)
+        WHERE vbeln_im EQ @ls_lips-vbeln
+          AND vbelp_im EQ @ls_lips-posnr
+          AND bwart EQ '107'
+          AND cancelled NE @abap_true.
+*------------add by yakir at 01.02.2021 16:58:49------end--*
+
+      APPEND lw_gitem TO lt_gitem.
+    ENDLOOP.
+
+    IF lt_gitem IS NOT INITIAL.
+      ls_ghead-pstng_date = sy-datum.
+      ls_ghead-doc_date = sy-datum.
+      ls_ghead-pr_uname = sy-uname.
+
+
+      CALL FUNCTION 'BAPI_GOODSMVT_CREATE'
+        EXPORTING
+          goodsmvt_header  = ls_ghead
+          goodsmvt_code    = ls_gcode
+        IMPORTING
+          materialdocument = ev_mblnr
+          matdocumentyear  = ev_mjahr
+        TABLES
+          goodsmvt_item    = lt_gitem
+          return           = lt_return.
+
+
+      IF NOT line_exists( lt_return[ type = 'E' ] )
+      AND NOT line_exists( lt_return[ type = 'A' ] ).
+
+        CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+          EXPORTING
+            wait = abap_true.
+        gs_msg-msg_type = 'S'.
+        gs_msg-msg_content = 'Z09过账执行成功！'.
+
+        ""把109凭证记录，后面出错要冲销
+        DATA(lv_109) = ev_mblnr.
+
+      ELSE.
+        CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = 'Z09过账执行失败！失败原因：'.
+        LOOP AT lt_return INTO DATA(ls_return).
+          gs_msg-msg_content = gs_msg-msg_content && '(' && sy-tabix && ').'
+          && ls_return-message && '______'.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+    CHECK gs_msg-msg_type NE 'E'.
+
+
+
+    ""MIGO 311产生 INBOUND DN  产生DN直接拿抬头一行产生到 INB DN就行
+    ""不要把OUT BOUND DN的多行数据丢过来
+    ls_gcode-gm_code = '04'.
+
+    CLEAR lw_gitem.
+
+*------------add by yakir at 29.01.2021 17:46:28------begin--*
+    ""检查是否启用检验
+    SELECT COUNT(*)
+      FROM qmat
+      WHERE matnr EQ ls_lips-matnr
+        """"AND werks EQ ls_data-lgnum
+        AND werks EQ lv_werks
+        AND art EQ '01'
+        AND aktiv EQ abap_true.
+    IF sy-subrc EQ 0.
+      lw_gitem-move_type  = '322'.
+    ELSE.
+      lw_gitem-move_type  = '312'.
+    ENDIF.
+*------------add by yakir at 29.01.2021 17:46:28------end--*
+
+    lw_gitem-material_long   = ls_lips-matnr."物料
+    lw_gitem-entry_qnt  = REDUCE #( INIT x TYPE menge_d
+    FOR ls_gitem IN lt_gitem
+    NEXT x = x + ls_gitem-entry_qnt )."数量
+    lw_gitem-entry_uom  = ls_data-meins."单位
+    """" lw_gitem-plant = ls_data-lgnum.
+    lw_gitem-plant = lv_werks.""ADD BY VICKY 24.04.2021 14:23:38
+    lw_gitem-move_stloc = cn_lgort_109.
+    lw_gitem-stge_loc   = ls_data-lgort."库存地点
+    lw_gitem-batch = ls_lips-charg.
+
+    IF ls_lips-charg = ''.
+      lw_gitem-prod_date  = ls_data-hsdat.
+    ENDIF.
+
+    REFRESH lt_gitem.
+    APPEND lw_gitem TO lt_gitem.
+
+
+    CALL FUNCTION 'BAPI_GOODSMVT_CREATE'
+      EXPORTING
+        goodsmvt_header  = ls_ghead
+        goodsmvt_code    = ls_gcode
+      IMPORTING
+        materialdocument = ev_mblnr
+        matdocumentyear  = ev_mjahr
+      TABLES
+        goodsmvt_item    = lt_gitem
+        return           = lt_return.
+
+
+    IF NOT line_exists( lt_return[ type = 'E' ] )
+    AND NOT line_exists( lt_return[ type = 'A' ] ).
+
+      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+        EXPORTING
+          wait = abap_true.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = gs_msg-msg_content && '——322过账执行成功！'.
+
+    ELSE.
+      CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = gs_msg-msg_content && '——322过账执行失败！失败原因：'.
+      LOOP AT lt_return INTO ls_return.
+        gs_msg-msg_content = gs_msg-msg_content && '(' && sy-tabix && ').'
+        && ls_return-message && '______'.
+      ENDLOOP.
+
+      IF lv_109 IS NOT INITIAL.
+        CALL FUNCTION 'BAPI_GOODSMVT_CANCEL'
+          EXPORTING
+            materialdocument    = lv_109
+            matdocumentyear     = sy-datum+0(4)
+            goodsmvt_pstng_date = sy-datum
+            goodsmvt_pr_uname   = sy-uname
+          TABLES
+            return              = lt_cancel.
+        IF NOT line_exists( lt_cancel[ type = 'E' ] )
+        AND NOT line_exists( lt_cancel[ type = 'A' ] ).
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+            EXPORTING
+              wait = abap_true.
+        ELSE.
+          CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+        ENDIF.
+      ENDIF.
+
+    ENDIF.
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+    CHECK gs_msg-msg_type NE 'E'.
+
+
+    lv_vbeln = lt_return[ 1 ]-message_v1.
+
+
+
+    ""对INBOUND DN数据进行打包和收货
+    EXPORT lv_109 = lv_109 TO MEMORY ID 'Z109'.
+
+    CALL FUNCTION 'ZFM_EWM_PACK'
+      EXPORTING
+        iv_dn    = lv_vbeln
+        iv_lgnum = ls_data-lgnum
+      TABLES
+        it_data  = lt_data
+      CHANGING
+        gs_msg   = gs_msg.
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+    CHECK gs_msg-msg_type NE 'E'.
+*
+*------------add by yakir at 26.11.2019 14:10:43------begin--*
+    ""提交数据到SCM
+*    CHECK gs_msg-msg_type NE 'E'.
+    DATA lt_scm TYPE TABLE OF zewms_scm.
+    IMPORT lt_scm = lt_scm FROM MEMORY ID 'ZSCMBAR'.
+*    DATA ls_scm TYPE zewms_scm.
+*    ls_scm-orderid = lv_vbeln.
+*    ls_scm-projectid = 10.
+*    MODIFY lt_scm FROM ls_scm TRANSPORTING orderid projectid
+*    WHERE orderid IS INITIAL.
+    DATA ls_log TYPE ztpda_jk_log.
+    IF lt_scm IS NOT  INITIAL.
+      DATA(lv_json) = /ui2/cl_json=>serialize( lt_scm ).
+      lv_json = '{ "UPDATELIST":' && lv_json && '}'.
+*      CALL FUNCTION 'ZFM_SCM_DATA_SAVE' STARTING NEW TASK 'ZSCM_T2'
+
+      ls_log-request_id = gv_request_id.
+      ls_log-request_data = lv_json.
+      ls_log-action = 'ZFM_SCM_DATA_SAVE'.
+      ls_log-create_user = sy-uname.
+      ls_log-create_date = sy-datum.
+      ls_log-create_time = sy-uzeit.
+
+      MODIFY ztpda_jk_log FROM ls_log.
+      COMMIT WORK.
+
+
+      CALL FUNCTION 'ZFM_SCM_DATA_SAVE' IN BACKGROUND TASK   "Jeff 20240709 改成后台进程，避免dialog进程不足，调用问题
+        EXPORTING
+          iv_json       = lv_json
+          iv_request_id = gv_request_id.
+
+      COMMIT WORK.
+    ENDIF.
+
+    ""提交数据到EWM ZTABLE
+    "SCM条码收货时将条码信息回写EWM，需要更新的表：条码信息表（ZEWMBARCODE）、条码关系表（ZZBCRL_HU）
+
+
+
+*------------add by yakir at 26.11.2019 14:10:43------end--*
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

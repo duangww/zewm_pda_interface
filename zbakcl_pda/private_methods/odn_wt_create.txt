@@ -1,0 +1,177 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD odn_wt_create.
+
+
+    DATA :BEGIN OF ls_data ,
+            lgnum TYPE 	/scwm/lgnum,
+            vbeln TYPE likp-vbeln,
+            uname TYPE uname, ""ADD BY VICKY 09.06.2021 09:10:29
+          END OF ls_data .
+
+    DATA:
+      lt_create_whr TYPE TABLE OF /scwm/s_to_prep_whr_int,
+      lw_create_whr LIKE LINE OF lt_create_whr,
+      ev_tanum      TYPE /scwm/tanum,
+      et_ltap_vb    TYPE /scwm/tt_ltap_vb,
+      lw_ltap_vb    LIKE LINE OF et_ltap_vb,
+      et_bapiret    TYPE bapirettab,
+      lw_bapiret    LIKE LINE OF et_bapiret,
+      ev_severity   TYPE bapi_mtype.
+
+    DATA et_data TYPE TABLE OF zewm_wt .
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_data ).
+
+
+    IF ls_data IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+    TRANSLATE ls_data-lgnum TO UPPER CASE.
+    TRANSLATE ls_data-uname TO UPPER CASE.
+    ""ADD BY VICKY 07.06.2021 15:26:53
+    AUTHORITY-CHECK OBJECT '/SCWM/TOCR'
+    FOR USER ls_data-uname
+    ID '/SCWM/LGNU' FIELD ls_data-lgnum .
+    IF sy-subrc <> 0.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '仓库编号' && ls_data-lgnum && '无权限'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    ls_data-vbeln = |{ ls_data-vbeln ALPHA = IN }|.
+
+    SELECT a~* INTO TABLE @DATA(lt_proci)
+*      FROM /scwm/huhdr AS a
+*      JOIN /scwm/huref AS b ON a~guid_hu EQ b~guid_hu AND b~doccat EQ 'PDI'
+     FROM /scdl/db_proci_o AS a
+     JOIN /scdl/db_refdoc  AS b ON a~docid EQ b~docid
+      AND b~itemid EQ  a~itemid AND b~refdoccat EQ 'ERP'
+    WHERE b~refdocno EQ @ls_data-vbeln.
+
+
+    LOOP AT lt_proci INTO DATA(lw_proci).
+      lw_create_whr-rdocid = lw_proci-docid.
+      lw_create_whr-ritmid = lw_proci-itemid.
+      lw_create_whr-rdoccat = lw_proci-doccat.
+
+*------------add by yakir at 21.01.2021 15:11:16------begin--*
+      SELECT SINGLE SUM( vsola )
+        FROM /scwm/ordim_o
+        INTO @DATA(lv_vsolao)
+        WHERE ritmid EQ @lw_proci-itemid
+          AND rdocid EQ @lw_proci-docid
+          AND rdoccat EQ @lw_proci-doccat
+          AND tostat NE 'A'.
+      SELECT SINGLE SUM( vsola )
+        FROM /scwm/ordim_c
+        INTO @DATA(lv_vsolac)
+        WHERE ritmid EQ @lw_proci-itemid
+          AND rdocid EQ @lw_proci-docid
+          AND rdoccat EQ @lw_proci-doccat
+          AND tostat NE 'A'.
+*------------add by yakir at 21.01.2021 15:11:16------end--*
+
+      lw_create_whr-anfme =  lw_proci-qty - ( lv_vsolao + lv_vsolac ).
+      lw_create_whr-altme =  lw_proci-uom.
+      APPEND lw_create_whr TO lt_create_whr.
+      CLEAR lw_create_whr.
+    ENDLOOP.
+
+    IF lt_create_whr IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '无法创建仓库任务，数据异常！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    CALL FUNCTION '/SCWM/TO_CREATE_WHR'
+      EXPORTING
+        iv_lgnum       = ls_data-lgnum
+        iv_process     = cn_2
+        it_create_whr  = lt_create_whr
+        iv_commit_work = space
+*       iv_mve_hu      = abap_true
+*       iv_mve_hu_mult = abap_true
+      IMPORTING
+        ev_tanum       = ev_tanum
+        et_ltap_vb     = et_ltap_vb
+        et_bapiret     = et_bapiret
+        ev_severity    = ev_severity.
+
+
+    IF NOT line_exists( et_bapiret[ type = 'E' ] )
+    AND NOT line_exists( et_bapiret[ type = 'A' ] )
+    AND et_ltap_vb IS NOT INITIAL.
+      COMMIT WORK AND WAIT.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content =  '仓库任务生成成功!'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+      SORT et_ltap_vb BY who.
+      DELETE ADJACENT DUPLICATES FROM et_ltap_vb COMPARING who.
+
+
+      SELECT o~lgnum,o~tanum,o~who,o~charg,o~vlpla,o~vlenr,
+        o~nlpla,o~nlenr,o~queue,o~vsolm,o~altme AS meins,o~nltyp,o~nlber,
+        t~mseh3,m~matnr AS matid,kt~maktx
+        FROM /scwm/ordim_o AS o
+        LEFT JOIN t006a AS t ON t~msehi = o~altme
+                            AND t~spras = @sy-langu
+        LEFT JOIN mara AS m ON o~matid EQ m~scm_matid_guid16
+        LEFT JOIN makt AS kt ON m~matnr EQ kt~matnr AND kt~spras EQ @sy-langu
+        INTO CORRESPONDING FIELDS OF TABLE @et_data
+        FOR ALL ENTRIES IN @et_ltap_vb
+        WHERE o~who EQ @et_ltap_vb-who
+          AND o~lgnum EQ @et_ltap_vb-lgnum.
+
+
+      LOOP AT et_data ASSIGNING FIELD-SYMBOL(<fs_data>).
+        <fs_data>-vlenr = |{ <fs_data>-vlenr ALPHA = OUT }|.
+        <fs_data>-nlenr = |{ <fs_data>-nlenr ALPHA = OUT }|.
+      ENDLOOP.
+
+      DATA(lv_json) = /ui2/cl_json=>serialize( et_data ).
+
+      SHIFT ev_json RIGHT DELETING TRAILING '}'.
+      ev_json = ev_json && ',"TASK":' && lv_json && '}'.
+
+    ELSE.
+      ROLLBACK WORK.
+      IF line_exists( et_bapiret[ type = 'E' ] ).
+        DATA(ls_ret) = et_bapiret[ type = 'E' ].
+        MESSAGE ID ls_ret-id TYPE ls_ret-type NUMBER ls_ret-number
+                INTO DATA(mtext)
+                WITH ls_ret-message_v1 ls_ret-message_v2 ls_ret-message_v3 ls_ret-message_v4.
+      ELSE.
+
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+          INTO mtext
+          WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      ENDIF.
+
+
+
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '仓库任务生成失败，失败原因：'
+      && mtext.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

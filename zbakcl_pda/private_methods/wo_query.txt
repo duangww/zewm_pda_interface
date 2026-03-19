@@ -1,0 +1,311 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD wo_query.
+
+    DATA:BEGIN OF ls_in,
+           lgnum    TYPE /scwm/ordim_o-lgnum,
+           queue    TYPE /scwm/ordim_o-queue,
+           refdocno TYPE vbeln,
+           who      TYPE /scwm/ordim_o-who,
+         END OF ls_in.
+
+*    TYPES:BEGIN OF LY_OUT,
+*            LGNUM TYPE /SCWM/ORDIM_O-LGNUM,    "仓库号
+*            WHO   TYPE /SCWM/ORDIM_O-WHO,   "仓库订单
+*            QUEUE TYPE /SCWM/ORDIM_O-QUEUE,      "队列
+*            TANUM TYPE /SCWM/ORDIM_O-TANUM,   "仓库任务
+*            MATID TYPE MATNR,   "产品
+*            MAKTX TYPE MAKT-MAKTX,   "描述
+*            CHARG TYPE /SCWM/ORDIM_O-CHARG,     "批次
+*            VLENR TYPE /SCWM/ORDIM_O-VLENR,      "源处理单元
+*            NLENR TYPE /SCWM/ORDIM_O-NLENR,      "目的地处理单位
+*            NLPLA TYPE /SCWM/ORDIM_O-NLPLA,     "目标储存箱
+*            VLPLA TYPE /SCWM/ORDIM_O-VLPLA,     "源仓位
+*            VSOLM TYPE /SCWM/ORDIM_O-VSOLM,     "目标数量-基本
+*            MEINS TYPE /SCWM/ORDIM_O-MEINS,     "单位-基本
+*            MSEH3 TYPE T006A-MSEH3,      "单位描述
+*          END OF LY_OUT.
+    DATA:lt_out TYPE TABLE OF zewm_wt,
+         wa_out TYPE zewm_wt.
+    DATA:lt_out1 TYPE TABLE OF zewm_wt,
+         wa_out1 TYPE zewm_wt.
+
+
+    TYPES:BEGIN OF ly_msg,
+            type TYPE char1,
+            info TYPE char100,
+          END OF ly_msg.
+    DATA:lt_msg TYPE TABLE OF ly_msg,
+         wa_msg TYPE ly_msg.
+    DATA:lv_matnr TYPE matnr.
+
+**********************************************************************
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_in ).
+
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = ls_in-refdocno
+      IMPORTING
+        output = ls_in-refdocno.
+
+    TRANSLATE ls_in-queue TO UPPER CASE.
+
+*  按照仓库号、队列进行查询
+    IF ls_in-lgnum IS NOT INITIAL AND ls_in-queue IS NOT INITIAL .
+
+      SELECT o~lgnum,o~tanum,o~who,o~matid,o~charg,o~vlpla,o~vlenr,o~cwrel,
+        o~nlpla,o~nlenr,o~queue,o~vsola AS vsolm,o~altme AS meins,"" 单位读取任务时单位 by yakir
+        t~mseh3,t~mseht
+        FROM /scwm/ordim_o AS o
+        LEFT JOIN t006a AS t ON t~msehi = o~altme
+                             AND t~spras = @sy-langu
+
+          WHERE lgnum = @ls_in-lgnum
+          AND queue = @ls_in-queue
+*          AND WHO = @LS_IN-WHO
+
+*------------add by yakir at 02.11.2020 17:33:09------begin--*
+       ORDER BY o~tanum
+       INTO TABLE @DATA(lt_itab).
+*------------add by yakir at 02.11.2020 17:33:09------end--*.
+
+      SORT lt_itab BY who.
+      READ TABLE lt_itab INTO DATA(wa_itab) INDEX 1.
+      IF sy-subrc = 0.
+
+        LOOP AT lt_itab INTO DATA(wa_itab1) WHERE who = wa_itab-who.
+          CALL FUNCTION 'CONVERSION_EXIT_MDLPD_OUTPUT'
+            EXPORTING
+              input  = wa_itab1-matid
+            IMPORTING
+              output = lv_matnr.
+
+          MOVE-CORRESPONDING wa_itab1 TO wa_out.
+
+          wa_out-matid = lv_matnr.
+
+          SELECT SINGLE b~maktx,a~meins AS zmeins,c~mseh3 AS zmseh3
+            FROM mara AS a
+            LEFT JOIN makt AS b ON b~matnr = a~matnr
+            LEFT JOIN t006a AS c ON c~msehi = a~meins
+                                AND c~spras = @sy-langu
+            WHERE a~matnr = @lv_matnr AND b~spras = @sy-langu
+            INTO ( @wa_out-maktx,@wa_out-zmeins,@wa_out-zmseh3 ) .
+
+          APPEND wa_out TO lt_out.
+          CLEAR:wa_itab1,wa_itab,lv_matnr,wa_out.
+        ENDLOOP.
+      ENDIF.
+
+*      APPEND LINES OF LT_OUT1 TO LT_OUT.
+    ENDIF.
+
+
+
+*  根据 仓库号、WO 查询
+    IF ls_in-lgnum IS NOT INITIAL AND ls_in-who IS NOT INITIAL .
+
+      SELECT o~lgnum,o~tanum,o~who,o~matid,o~charg,o~vlpla,o~vlenr,o~cwrel,
+        o~nlpla,o~nlenr,o~queue,o~vsola AS vsolm,o~altme AS meins,
+        t~mseh3,t~mseht
+        FROM /scwm/ordim_o AS o
+        LEFT JOIN t006a AS t ON t~msehi = o~altme
+                            AND t~spras = @sy-langu
+        WHERE lgnum = @ls_in-lgnum
+        AND who = @ls_in-who
+        INTO TABLE @DATA(lt1).
+
+*      APPEND LINES OF lt1 TO LT_OUT.
+      LOOP AT lt1 INTO DATA(wa1).
+
+        CALL FUNCTION 'CONVERSION_EXIT_MDLPD_OUTPUT'
+          EXPORTING
+            input  = wa1-matid
+          IMPORTING
+            output = lv_matnr.
+
+        MOVE-CORRESPONDING wa1 TO wa_out.
+        wa_out-matid = lv_matnr.
+
+        SELECT SINGLE b~maktx,a~meins AS zmeins,c~mseh3 AS zmseh3
+        FROM mara AS a
+        LEFT JOIN makt AS b ON b~matnr = a~matnr
+        LEFT JOIN t006a AS c ON c~msehi = a~meins
+        AND c~spras = @sy-langu
+        WHERE a~matnr = @lv_matnr AND b~spras = @sy-langu
+        INTO ( @wa_out-maktx,@wa_out-zmeins,@wa_out-zmseh3 ) .
+
+        APPEND wa_out TO lt_out.
+        CLEAR:lv_matnr,wa1,wa_out.
+      ENDLOOP.
+    ENDIF.
+
+*  按照 交货单 进行查询
+    IF ls_in-refdocno IS NOT INITIAL.
+
+      SELECT a~lgnum,a~tanum,a~who,
+        a~matid,
+        a~charg,a~vlpla,
+        a~vlenr,a~nlpla,a~nlenr,a~queue,a~vsola AS vsolm,a~altme AS meins,a~cwrel,
+        t~mseh3,t~mseht
+        FROM /scwm/ordim_o AS a
+        LEFT JOIN t006a AS t ON t~msehi = a~meins
+                             AND t~spras = @sy-langu
+        WHERE EXISTS ( SELECT *
+                         FROM /scdl/db_refdoc AS b
+                         WHERE refdocno = @ls_in-refdocno
+                         AND refdoccat = 'ERP'
+                         AND b~docid = a~rdocid
+                         AND b~itemid = a~ritmid )
+        INTO  TABLE @DATA(lt2).
+
+      LOOP AT lt2 INTO DATA(wa2).
+
+        CALL FUNCTION 'CONVERSION_EXIT_MDLPD_OUTPUT'
+          EXPORTING
+            input  = wa2-matid
+          IMPORTING
+            output = lv_matnr.
+
+
+        MOVE-CORRESPONDING wa2 TO wa_out.
+        wa_out-matid = lv_matnr.
+
+        SELECT SINGLE b~maktx,a~meins AS zmeins,c~mseh3 AS zmseh3
+        FROM mara AS a
+        LEFT JOIN makt AS b ON b~matnr = a~matnr
+        LEFT JOIN t006a AS c ON c~msehi = a~meins
+        AND c~spras = @sy-langu
+        WHERE a~matnr = @lv_matnr AND b~spras = @sy-langu
+        INTO ( @wa_out-maktx,@wa_out-zmeins,@wa_out-zmseh3 ) .
+
+        APPEND wa_out  TO lt_out.
+        CLEAR:lv_matnr,wa2,wa_out.
+      ENDLOOP.
+
+    ENDIF.
+
+* 去前导零
+    LOOP AT lt_out INTO wa_out.
+      MOVE-CORRESPONDING wa_out TO wa_out1.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+        EXPORTING
+          input  = wa_out1-vlenr
+        IMPORTING
+          output = wa_out1-vlenr.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+        EXPORTING
+          input  = wa_out1-nlenr
+        IMPORTING
+          output = wa_out1-nlenr.
+
+*      MODIFY lt_out FROM wa_out TRANSPORTING vlenr nlenr.
+
+*---------------add by AlanWang-----14.02.2020 11:39:42------------------------------------
+* PDA发货过帐时，交货单查询时，如果交货单中没有批次而物料有批次管理，
+* 则需要查询EWM中的此项目的WT中批次和数量汇总返回，使用相同的交货单行项目号
+      COLLECT wa_out1 INTO lt_out1 .
+*-------------------------end-------14.02.2020 11:39:42------------------------------------
+      CLEAR:wa_out.
+    ENDLOOP.
+
+
+    SORT lt_out1 BY lgnum.
+    DELETE ADJACENT DUPLICATES FROM lt_out1.
+
+    IF lt_out1[] IS INITIAL.
+      wa_msg-type = 'E'.
+      wa_msg-info = '查询失败！查询无数据！'.
+      APPEND wa_msg   TO lt_msg.
+    ELSE.
+      wa_msg-type = 'S'.
+      wa_msg-info = '查询成功！'.
+      APPEND wa_msg   TO lt_msg.
+    ENDIF.
+
+
+*------------add by yakir at 24.11.2020 09:49:03------begin--*
+    ""单位转换为 ERP DN 单位
+    LOOP AT lt_out1 REFERENCE INTO DATA(lr_out).
+
+      SELECT SINGLE b~refdocno,b~refitemno
+        FROM /scwm/ordim_o AS a JOIN
+            /scdl/db_refdoc AS b ON a~rdocid EQ b~docid
+            AND a~ritmid EQ  b~itemid AND b~refdoccat EQ 'ERP'
+        INTO @DATA(ls_dn)
+        WHERE a~tanum EQ @lr_out->tanum.
+      IF sy-subrc EQ 0.
+        DATA(lr_dn) = NEW vbeln( ls_dn-refdocno ).
+        DATA(lr_item) = NEW posnr( ls_dn-refitemno ).
+        SELECT SINGLE vrkme
+          FROM lips
+          INTO @DATA(lv_vrkme)
+          WHERE vbeln EQ @lr_dn->*
+            AND posnr EQ @lr_item->*.
+        IF sy-subrc EQ 0 AND lv_vrkme NE lr_out->meins.
+*------------add by yakir at 25.01.2021 21:20:28------begin--*
+          SELECT COUNT(*)
+            FROM marm
+            WHERE ty2tq EQ 'B'
+              AND meinh EQ lv_vrkme
+              AND matnr EQ lv_matnr.
+          CHECK sy-subrc EQ 0.
+*------------add by yakir at 25.01.2021 21:20:28------end--*
+
+          DATA(lr_menge) = NEW menge_d( lr_out->vsolm ).
+          CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+            EXPORTING
+              i_matnr              = lr_out->matid
+              i_in_me              = lr_out->meins
+              i_out_me             = lv_vrkme
+              i_menge              = lr_menge->*
+            IMPORTING
+              e_menge              = lr_menge->*
+            EXCEPTIONS
+              error_in_application = 1
+              error                = 2
+              OTHERS               = 3.
+          IF sy-subrc EQ 0.
+            lr_out->vsolm = lr_menge->*.
+            lr_out->meins = lv_vrkme.
+            SELECT SINGLE mseht
+              FROM t006a
+              INTO @lr_out->mseht
+              WHERE msehi EQ @lr_out->meins
+                AND spras EQ @sy-langu.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      ""单位转中文
+
+    ENDLOOP.
+*------------add by yakir at 24.11.2020 09:49:03------end--*
+
+* vsolm参考标准事务码/scwm/to_disp显示仓库任务的class:/SCWM/CL_UI_TO_DISP,方法:QRY_TO_SIMPLE
+*  代码ls_asp_to = move_ordo_to_asp( ls_ordim_o ).做类型转换
+* 把例如底表是31679.99999999990000和前台的31680.000不一致问题
+    LOOP AT lt_out1 ASSIGNING FIELD-SYMBOL(<fs_out1>).
+      <fs_out1>-vsolm = CONV /scwm/de_ui_vsolbme( <fs_out1>-vsolm ).
+    ENDLOOP.
+
+    DATA(ev_json1) = /ui2/cl_json=>serialize( lt_out1 ).
+    DATA(ev_json2) = /ui2/cl_json=>serialize( lt_msg ).
+
+    CONCATENATE '{"WT_TABLE":' ev_json1 ',"MESSAGE":' ev_json2 '}' INTO ev_json.
+
+    CLEAR:ev_json1,ev_json2,wa_msg,wa_out.
+    REFRESH: lt_msg,lt_out,lt_out1.
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

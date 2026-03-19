@@ -1,0 +1,41 @@
+FUNCTION zfm_lock_hu.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(I_HUBOX) TYPE  /SCWM/DE_HUIDENT OPTIONAL
+*"     VALUE(I_HUPAL) TYPE  /SCWM/DE_HUIDENT OPTIONAL
+*"  EXPORTING
+*"     VALUE(ES_MSG) TYPE  ZBAKS_MSG_PDA
+*"----------------------------------------------------------------------
+
+  DATA lv_varkey TYPE rstable-varkey.
+  DATA lv_msg TYPE string.
+
+  IF i_hubox IS NOT INITIAL.
+    lv_varkey = |{ i_hubox ALPHA = OUT }|.
+  ELSEIF i_hupal IS NOT INITIAL.
+    lv_varkey = |{ i_hupal ALPHA = OUT }|.
+  ENDIF.
+
+  CHECK lv_varkey IS NOT INITIAL.
+
+  CALL FUNCTION 'ENQUEUE_E_TABLE'
+    EXPORTING
+      mode_rstable   = 'E'
+      tabname        = '/SCWM/HUHDR'
+      varkey         = lv_varkey
+    EXCEPTIONS
+      foreign_lock   = 1
+      system_failure = 2
+      OTHERS         = 3.
+
+  IF sy-subrc NE 0.
+    es_msg-msg_type = 'E'.
+    es_msg-msg_content = |HU:{ lv_varkey }被账号{ sy-msgv1 }锁定|.
+
+  ENDIF.
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

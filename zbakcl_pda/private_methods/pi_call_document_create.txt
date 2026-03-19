@@ -1,0 +1,167 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD pi_call_document_create.
+    DATA:BEGIN OF ls_in,
+           lgnum      TYPE /scwm/lgnum,            "仓库
+           ref_doc_id TYPE /lime/ref_doc_id,       "资源
+           lgpla      TYPE /scwm/lgpla,            "货位
+           doc_type   TYPE /lime/pi_document_type, "盘点类型
+           uname      TYPE uname, ""ADD BY VICKY 09.06.2021 09:13:18
+
+         END OF ls_in.
+
+
+    DATA ls_head TYPE /lime/pi_head_create.
+    DATA lt_item TYPE TABLE OF /lime/pi_item_create.
+    DATA ls_item TYPE /lime/pi_item_create.
+    DATA iv_sim_mode TYPE /lime/sim_mode." 模拟模式 X
+    DATA lt_bapiret TYPE  bapiret2_t.
+    DATA l_rc_severity TYPE bapi_mtype.
+    DATA lt_reference     TYPE /lime/pi_t_reference.
+    DATA ls_reference     TYPE /lime/pi_reference.
+    DATA:lv_date TYPE tzonref-tstamps.
+
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_in ).
+
+    CLEAR:ls_head,iv_sim_mode,l_rc_severity.
+    REFRESH: lt_item,lt_bapiret.
+
+*----add by vicky at 08.06.2021 16:44:50  begin-----------*
+    TRANSLATE ls_in-uname TO UPPER CASE.
+    TRANSLATE ls_in-lgnum TO UPPER CASE.
+    AUTHORITY-CHECK OBJECT '/SCWM/PIPR'
+    FOR USER ls_in-uname
+     ID '/SCWM/LGNU' FIELD ls_in-lgnum
+     ID 'ACTVT' FIELD '01'.
+    IF sy-subrc <> 0.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '仓库号' && ls_in-lgnum && '无盘点权限'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+*----add by vicky at 08.06.2021 16:44:50 end-----------*
+
+
+
+
+    TRANSLATE ls_in-lgpla TO UPPER CASE.
+
+
+    SELECT SINGLE c~doc_number,a~item_no
+      FROM /lime/pi_par_biz AS a
+      JOIN /lime/pi_doc_it AS b ON a~guid_doc EQ b~guid_doc
+                              AND a~item_no EQ b~item_no
+                             AND a~line_idx EQ b~line_idx
+                             AND a~change_seq EQ b~change_seq
+                             AND a~item_type EQ b~item_type
+      JOIN /lime/pi_loghead AS c ON c~guid_doc EQ b~guid_doc
+      WHERE a~lgpla EQ @ls_in-lgpla
+      AND b~doc_status EQ 'ACTI'
+      INTO @DATA(ls_doc).
+    IF sy-subrc = 0.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '凭证' && ls_doc-doc_number && '/' && ls_doc-item_no && '已为仓位' && ls_in-lgpla && '激活'.
+      gs_msg-ref_doc = ls_doc-doc_number.
+      gs_msg-ref_doc = |{ gs_msg-ref_doc ALPHA = OUT }|.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+
+
+
+
+
+
+    ls_head-process_type = 'SCWM'.
+    "ls_head-lgnum = '1100'.
+    ls_head-lgnum = ls_in-lgnum.
+    ls_head-active = 'A'.
+
+    ls_item-active = 'X'.
+    ls_item-data-doc_type = ls_in-doc_type.
+    ls_item-data-type_parent = 'L'.
+    "ls_item-data-count_date = '20191119155959.0000000'.
+    ls_item-data-reason = 'UPLD'.
+    ls_item-data-priority = 1.
+    ls_item-data-loc_parent-lgnum = ls_in-lgnum.
+
+
+    CALL FUNCTION 'IB_CONVERT_INTO_TIMESTAMP'
+      EXPORTING
+        i_datlo     = sy-datum
+        i_timlo     = sy-uzeit
+        i_tzone     = sy-zonlo
+      IMPORTING
+        e_timestamp = lv_date.
+    ls_item-data-count_date = lv_date.
+
+    SELECT SINGLE lgtyp
+      FROM /scwm/lagp
+      WHERE lgnum = @ls_in-lgnum
+      AND lgpla = @ls_in-lgpla
+      INTO @ls_item-data-loc_parent-lgtyp.
+
+    ls_item-data-loc_parent-lgpla = ls_in-lgpla.
+    ls_reference-ref_doc_id = ls_in-ref_doc_id.
+    ls_reference-ref_doc_type = 'SCWM_REFUI'.
+    APPEND ls_reference TO lt_reference.
+    ls_item-t_reference = lt_reference.
+    APPEND ls_item TO lt_item.
+
+    iv_sim_mode = 'X'.
+    CALL FUNCTION '/SCWM/PI_CALL_DOCUMENT_CREATE'
+      EXPORTING
+        is_head       = ls_head
+        it_item       = lt_item
+        i_sim_mode    = iv_sim_mode
+      IMPORTING
+        et_bapiret    = lt_bapiret
+        e_rc_severity = l_rc_severity.
+    IF l_rc_severity = 'S'.
+
+      CLEAR l_rc_severity.
+      REFRESH lt_bapiret.
+      iv_sim_mode = ''.
+      CALL FUNCTION '/SCWM/PI_CALL_DOCUMENT_CREATE'
+        EXPORTING
+          is_head       = ls_head
+          it_item       = lt_item
+          i_sim_mode    = iv_sim_mode
+        IMPORTING
+          et_bapiret    = lt_bapiret
+          e_rc_severity = l_rc_severity.
+      IF l_rc_severity = 'S'.
+        COMMIT WORK AND WAIT.
+        gs_msg-msg_type = l_rc_severity.
+        gs_msg-msg_content = lt_bapiret[ 1 ]-message.
+        gs_msg-ref_doc = lt_bapiret[ 1 ]-message_v1.
+      ELSE.
+        ROLLBACK WORK.
+        gs_msg-msg_type = l_rc_severity.
+        LOOP AT lt_bapiret INTO DATA(ls_bapiret) .
+          gs_msg-msg_content = gs_msg-msg_content && ls_bapiret-message.
+        ENDLOOP.
+      ENDIF.
+
+    ELSE.
+      gs_msg-msg_type = l_rc_severity.
+      LOOP AT lt_bapiret INTO ls_bapiret.
+        gs_msg-msg_content = gs_msg-msg_content && ls_bapiret-message && '.'.
+      ENDLOOP.
+    ENDIF.
+
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

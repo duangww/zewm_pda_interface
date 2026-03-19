@@ -1,0 +1,366 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD odn_wt_confirm.
+
+
+    DATA ls_data TYPE zewm_wt.
+    DATA lt_data TYPE TABLE OF zewm_wt.
+
+    DATA lt_conf TYPE /scwm/to_conf_tt.
+    DATA lt_conf_exc TYPE /scwm/tt_conf_exc.
+    DATA lw_conf TYPE /scwm/to_conf.
+    DATA lw_conf_exc TYPE /scwm/s_conf_exc.
+    DATA lt_return TYPE bapirettab.
+    DATA ls_who TYPE /scwm/s_who_int.
+    DATA lt_who TYPE TABLE OF /scwm/s_who_int.
+    DATA lr_hu TYPE  RANGE OF /scwm/ordim_o-vlenr.
+    DATA:et_huitm TYPE  /scwm/tt_stock_select.
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    DATA gt_msg LIKE TABLE OF gs_msg.
+
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+    REPLACE ALL OCCURRENCES OF '"TASK":'  IN lv_cdata WITH space.
+    SHIFT lv_cdata LEFT DELETING LEADING '{'.
+    SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_data ).
+
+
+    IF lt_data IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+
+    DATA(lt_temp) = lt_data.
+    SORT lt_temp BY who.
+    DELETE ADJACENT DUPLICATES FROM lt_temp COMPARING who.
+
+    IF lines( lt_temp ) > 1.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '目前仅支持 一次确认 一个订单下的所有任务！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+
+    LOOP AT lt_data ASSIGNING FIELD-SYMBOL(<fs_data>).
+
+*------------add by yakir at 28.01.2021 13:36:07------begin--*
+      ""如果传入的单位和任务基本单位不一致，要先把对应数量转为任务单位
+      SELECT SINGLE meins,matid
+        FROM /scwm/ordim_o
+        INTO (@DATA(lv_meins),@DATA(lv_matid))
+        WHERE tanum EQ @<fs_data>-tanum
+          AND lgnum EQ @<fs_data>-lgnum.
+      IF sy-subrc EQ 0
+        AND lv_meins NE <fs_data>-meins.
+
+        CALL FUNCTION 'CONVERSION_EXIT_MDLPD_OUTPUT'
+          EXPORTING
+            input  = lv_matid
+          IMPORTING
+            output = <fs_data>-matid.
+
+        DATA(lr_menge) = NEW menge_d( <fs_data>-act_qty ).
+
+        CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+          EXPORTING
+            i_matnr              = <fs_data>-matid
+            i_in_me              = <fs_data>-meins
+            i_out_me             = lv_meins
+            i_menge              = lr_menge->*
+          IMPORTING
+            e_menge              = lr_menge->*
+          EXCEPTIONS
+            error_in_application = 1
+            error                = 2
+            OTHERS               = 3.
+        <fs_data>-act_qty = lr_menge->*.
+        <fs_data>-meins = lv_meins.
+      ENDIF.
+*------------add by yakir at 28.01.2021 13:36:07------end--*
+
+      ""ADD BY VICKY 07.06.2021 15:34:08
+      SELECT SINGLE VLTYP FROM /SCWM/ORDIM_O
+        WHERE LGNUM = @<FS_DATA>-LGNUM
+        AND TANUM = @<FS_DATA>-TANUM
+        INTO @DATA(lv_lgtyp).
+
+*      SELECT SINGLE lgtyp
+*      FROM /scwm/lagp
+*      WHERE lgnum = @<FS_DATA>-LGNUM
+*      AND lgpla = @<FS_DATA>-nlpla
+*      INTO @DATA(lv_lgtyp).
+      IF sy-subrc NE 0.
+        CLEAR lv_lgtyp.
+      ENDIF.
+
+      TRANSLATE <FS_DATA>-uname TO UPPER CASE.
+      TRANSLATE <FS_DATA>-lgnum TO UPPER CASE.
+      AUTHORITY-CHECK OBJECT '/SCWM/TOCR'
+      FOR USER <FS_DATA>-uname
+      ID '/SCWM/LGNU' FIELD <FS_DATA>-LGNUM
+      ID '/SCWM/LGTY' FIELD lv_lgtyp.
+      IF sy-subrc <> 0.
+
+        CLEAR gs_msg.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '仓库编号&存储类型：' && <FS_DATA>-LGNUM && '&' && lv_lgtyp && '无权限'..
+        APPEND gs_msg TO gt_msg.
+        ev_json = /ui2/cl_json=>serialize( gt_msg ).
+        ev_json = '{ "MESSAGE":' && ev_json && '}'.
+
+
+        RETURN.
+      ENDIF.
+
+    ENDLOOP.
+
+    ""一次只会传入一个任务号的数据，但可能拆分多行确认！
+
+    LOOP AT lt_data INTO DATA(ls_head)
+      GROUP BY ls_head-tanum ASCENDING.
+
+      SELECT SINGLE noitm
+        FROM /scwm/ordim_o
+        INTO ls_data-noitm
+        WHERE tanum EQ ls_head-tanum
+          AND lgnum EQ ls_head-lgnum.
+
+*      ASSERT sy-subrc EQ 0.
+      IF sy-subrc NE 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '接口数据异常！'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+
+      DATA(lv_num) = ls_data-noitm.
+
+
+      lr_hu = VALUE #( FOR lrs_hu IN lt_data
+      ( sign = 'I'
+        option = 'EQ'
+        low = |{ lrs_hu-vlenr ALPHA = IN }| ) ).
+
+      SORT lr_hu BY low.
+      DELETE ADJACENT DUPLICATES FROM lr_hu COMPARING low.
+
+      DATA(ir_huident)  = NEW rseloption( lr_hu ).
+      CALL FUNCTION '/SCWM/SELECT_STOCK'
+        EXPORTING
+          iv_lgnum   = lt_data[ 1 ]-lgnum
+          ir_huident = ir_huident->*
+        IMPORTING
+          et_huitm   = et_huitm
+        EXCEPTIONS
+          error      = 1
+          OTHERS     = 2.
+
+      LOOP AT lt_data INTO ls_data
+        WHERE tanum EQ ls_head-tanum.
+
+        TRANSLATE ls_data-uname TO UPPER CASE.
+        TRANSLATE ls_data-rsrc TO UPPER CASE.
+        ls_data-vlenr = |{ ls_data-vlenr ALPHA = IN }|.
+        ls_data-nlenr = |{ ls_data-nlenr ALPHA = IN }|.
+
+        CLEAR lw_conf.
+        lw_conf-tanum = ls_data-tanum.
+
+        ""拆分时 要把仓库任务行 自加1
+        lw_conf-papos = lv_num + 1.
+        lv_num = lv_num + 1.
+
+
+        ""数量填充
+        IF ls_data-act_qty NE 0.
+          lw_conf-nista = ls_data-act_qty.
+
+          ""判断是否部分拣配
+          DATA(lv_qty) = REDUCE #( INIT x TYPE /scwm/ltap_vsolm
+          FOR wa IN lt_data
+          WHERE ( tanum = ls_head-tanum )
+          NEXT x = x + wa-act_qty ) .""部分拣配标识判断使用
+
+          IF ls_data-cwquan IS NOT INITIAL
+            AND ls_data-cwunit IS NOT INITIAL.
+            IF lv_qty NE ls_data-act_qty.
+              lw_conf-parti = 'X'.
+            ENDIF.
+          ELSE.
+            IF lv_qty NE ls_data-vsolm.
+              lw_conf-parti = 'X'.
+            ENDIF.
+          ENDIF.
+
+
+          CLEAR ls_data-act_qty.
+
+        ELSE.
+          lw_conf-nista = ls_data-vsolm.
+        ENDIF.
+
+        ""评估数量？
+        lw_conf-cwquan = ls_data-cwquan.
+        lw_conf-cwunit = ls_data-cwunit.
+
+        ""是否完全提取HU?
+        ""hu stock
+        SELECT SINGLE guid_hu
+          FROM /scwm/huhdr
+          INTO @DATA(lv_guid)
+          WHERE huident EQ @ls_data-vlenr.
+
+        IF line_exists( et_huitm[ guid_parent = lv_guid ] ).
+          IF et_huitm[ guid_parent = lv_guid ]-altme EQ ls_data-meins
+            AND lw_conf-nista = et_huitm[ guid_parent = lv_guid ]-quana.
+            lw_conf-huent = abap_true.
+            lw_conf-nlenr = lw_conf-vlenr.
+          ELSE.
+            lr_menge = NEW menge_d( ls_data-vsolm ).
+            DATA(lv_altme) = et_huitm[ guid_parent = lv_guid ]-altme.
+*------------add by baksapkf at 14.02.2023 09:39:54------begin--*
+****        处理转换单位为SET的HU确认数量不一致问题,取转换后ls_data-act_qty 的数量
+            IF lv_altme EQ 'SET'.
+
+              lr_menge = NEW menge_d( lw_conf-nista ).
+
+            ENDIF.
+*------------add by baksapkf at 14.02.2023 09:39:54------end--*
+            CALL FUNCTION 'MD_CONVERT_MATERIAL_UNIT'
+              EXPORTING
+                i_matnr              = ls_data-matid
+                i_in_me              = ls_data-meins
+                i_out_me             = lv_altme
+                i_menge              = lr_menge->*
+              IMPORTING
+                e_menge              = lr_menge->*
+              EXCEPTIONS
+                error_in_application = 1
+                error                = 2
+                OTHERS               = 3.
+            IF sy-subrc EQ 0
+              AND lr_menge->* EQ et_huitm[ guid_parent = lv_guid ]-quana.
+              lw_conf-huent = abap_true.
+              lw_conf-nlenr = lw_conf-vlenr.
+            ENDIF.
+          ENDIF.
+
+
+        ENDIF.
+
+
+
+
+        lw_conf-altme = ls_data-meins.
+
+
+
+        lw_conf-vlenr = ls_data-vlenr.
+        lw_conf-nlpla = ls_data-nlpla.
+        IF lw_conf-nlpla IS INITIAL.
+*          lw_conf-nlpla = 'GI-ZONE'.
+        ENDIF.
+        APPEND lw_conf TO lt_conf.
+
+        MODIFY lt_data FROM ls_data.
+      ENDLOOP.
+
+
+    ENDLOOP.
+
+
+    CALL FUNCTION '/SCWM/TO_CONFIRM'
+      EXPORTING
+        iv_lgnum       = lt_data[ 1 ]-lgnum
+        it_conf        = lt_conf
+*       it_conf_exc    = lt_conf_exc
+        iv_commit_work = space
+        iv_update_task = space
+        iv_qname       = lt_data[ 1 ]-uname
+      IMPORTING
+        et_bapiret     = lt_return.
+
+
+    IF NOT line_exists( lt_return[ type = 'E' ] )
+      AND NOT line_exists( lt_return[ type = 'A' ] ).
+
+      COMMIT WORK AND WAIT.
+      CLEAR gs_msg.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '仓库订单确认完成！'.
+      gs_msg-who = ls_data-who.
+      APPEND gs_msg TO gt_msg.
+
+      ""更新资源
+      CALL FUNCTION '/SCWM/WHO_GET'
+        EXPORTING
+          iv_lgnum      = lt_data[ 1 ]-lgnum
+          iv_whoid      = lt_data[ 1 ]-who "WHO number
+        IMPORTING
+          es_who        = ls_who
+        EXCEPTIONS
+          /scwm/cx_core = 1
+          OTHERS        = 2.
+      IF sy-subrc EQ 0.
+        ls_who-rsrc = lt_data[ 1 ]-rsrc ."Resource number
+        SELECT COUNT(*)
+        FROM  /scwm/ordim_o
+        WHERE who EQ ls_who-who.
+
+        IF sy-subrc EQ 0.
+          ls_who-status = cn_d.
+        ELSE.
+          ls_who-status = cn_c.
+        ENDIF.
+
+        ls_who-updkz = cn_u."change indicator: D-delete.I-insert,U-update
+        GET TIME STAMP FIELD ls_who-confirmed_at.
+        ls_who-confirmed_by = lt_data[ 1 ]-uname.
+        APPEND ls_who TO lt_who.
+        CALL FUNCTION '/SCWM/WHO_DB_UPDATE'
+          EXPORTING
+            it_who = lt_who.
+      ENDIF.
+
+
+    ELSE.
+
+      ROLLBACK WORK.
+
+      DATA(ls_return) = lt_return[ type = 'E' ].
+
+      MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+              INTO DATA(mtext)
+              WITH ls_return-message_v1 ls_return-message_v2 ls_return-message_v3 ls_return-message_v4.
+
+      CLEAR gs_msg.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '仓库订单确认失败！原因：'
+      && mtext.
+      gs_msg-who = ls_data-who.
+      APPEND gs_msg TO gt_msg.
+    ENDIF.
+
+
+
+
+    ev_json = /ui2/cl_json=>serialize( gt_msg ).
+    ev_json = '{ "MESSAGE":' && ev_json && '}'.
+
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

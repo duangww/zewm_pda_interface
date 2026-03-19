@@ -1,0 +1,146 @@
+FUNCTION zewm_post_gm.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(IP_DOCID) TYPE  /SCDL/DL_DOCID
+*"     VALUE(IP_DOCCAT) TYPE  /SCDL/DL_DOCCAT
+*"     VALUE(IP_LGNUM) TYPE  /SCWM/LGNUM
+*"     VALUE(IV_GMCAT) TYPE  /SCDL/DL_DOCCAT
+*"  EXPORTING
+*"     REFERENCE(EP_MES) TYPE  /SCDL/DM_MESSAGE_TAB
+*"----------------------------------------------------------------------
+*  INCLUDE zfmparavalsave.
+*  DATA RTYPE TYPE MSGTY.
+*  DATA RTMSG TYPE MSGTX.
+*  zfmparavalsave1 'ZEWM_POST_GM'.
+*  zfmparavalsave2 'B'.
+  DATA:
+    ls_docid           TYPE LINE OF /scdl/t_sp_k_head,
+    lt_dlv             TYPE /scwm/dlv_docid_item_tab,
+    ls_dlv             LIKE LINE OF lt_dlv,
+    lo_message         TYPE REF TO /scdl/cl_dm_message,
+    lt_mes             TYPE /scdl/dm_message_tab,
+    lw_/scdl/db_dlvi_o TYPE /scdl/db_dlvi_o,
+    lo_sp_prd          TYPE REF TO /scdl/cl_sp_prd_out,
+    lo_sp_prd_in       TYPE REF TO /scdl/cl_sp_prd_inb,
+    lo_message_box     TYPE REF TO /scdl/cl_sp_message_box,
+    lv_rejected        TYPE boole_d.
+
+  TRY.
+      CREATE OBJECT lo_message_box.
+  ENDTRY.
+
+* set delivery for goods issue
+*  LOOP AT it_docid INTO ls_docid.
+  ls_dlv-doccat = ip_doccat.
+  ls_dlv-docid  = ip_docid.
+  APPEND ls_dlv TO lt_dlv.
+*  ENDLOOP.
+
+* post goods movement
+  /scwm/cl_goods_movement=>cleanup( ).
+
+*  IF ip_type = 1.
+
+*    SELECT SINGLE *
+*      FROM /scdl/db_dlvi_o
+*      INTO lw_/scdl/db_dlvi_o
+*      WHERE refdocid = ip_docid.
+*    IF sy-subrc <> 0.
+*      PERFORM frm_create_fd USING ip_docid ip_lgnum
+*                            CHANGING lv_mes.
+*      ep_mes[] = lv_mes[].
+*      CLEAR lv_mes[].
+*    ENDIF.
+
+    /scwm/cl_goods_movement=>post_dlv(
+      EXPORTING
+        it_dlv      = lt_dlv
+        iv_gmcat    = iv_gmcat
+      IMPORTING
+         eo_message = lo_message ).
+
+*  ELSEIF ip_type = 2. "cancel posting
+*    /scwm/cl_goods_movement=>post_dlv(
+*      EXPORTING
+*        it_dlv      = lt_dlv
+*        iv_gmcat    = iv_gmcat
+*      IMPORTING
+*         eo_message = lo_message ).
+*
+*  ENDIF.
+
+* message handling
+  IF lo_message IS BOUND.
+
+    lt_mes = lo_message->get_messages( ).
+
+*    IF ep_mes[] IS INITIAL.
+    /scwm/cl_goods_movement=>save_gm(
+    IMPORTING
+       eo_message = lo_message ).
+    IF lo_message IS BOUND.
+      lt_mes = lo_message->get_messages( ).
+    ENDIF.
+
+    IF NOT line_exists( lt_mes[ msgty = 'E'] )
+    AND NOT line_exists( lt_mes[ msgty = 'A'] ) .
+
+*      /scwm/cl_goods_movement=>save( ).
+
+      CASE iv_gmcat.
+        WHEN /scwm/if_docflow_c=>sc_gr OR /scwm/if_docflow_c=>sc_grr.
+          CREATE OBJECT lo_sp_prd_in
+            EXPORTING
+              io_message_box = lo_message_box
+              iv_doccat      = /scdl/if_dl_doc_c=>sc_doccat_inb_prd
+              iv_mode        = /scdl/cl_sp=>sc_mode_classic.
+
+          CALL METHOD lo_sp_prd_in->save
+            IMPORTING
+              rejected = lv_rejected.
+
+          COMMIT WORK AND WAIT.
+
+        WHEN /scwm/if_docflow_c=>sc_gi OR /scwm/if_docflow_c=>sc_gir.
+          CREATE OBJECT lo_sp_prd
+            EXPORTING
+              io_message_box = lo_message_box
+              iv_doccat      = /scdl/if_dl_doc_c=>sc_doccat_out_prd
+              iv_mode        = /scdl/cl_sp=>sc_mode_classic.
+
+          CALL METHOD lo_sp_prd->save
+            IMPORTING
+              rejected = lv_rejected.
+
+          COMMIT WORK AND WAIT.
+      ENDCASE.
+
+    ELSE.
+
+      APPEND LINES OF lt_mes TO ep_mes.
+    ENDIF.
+*      CALL METHOD /scwm/cl_dlv_recov_srv=>save( ).
+    /scwm/cl_goods_movement=>cleanup( ).
+    IF lo_sp_prd IS BOUND.
+      CALL METHOD lo_sp_prd->cleanup(
+        EXPORTING
+          reason = lo_sp_prd->sc_cleanup_commit ).
+    ELSEIF lo_sp_prd_in IS BOUND .
+      CALL METHOD lo_sp_prd_in->cleanup(
+        EXPORTING
+          reason = lo_sp_prd_in->sc_cleanup_commit ).
+    ENDIF.
+
+*      ELSE.
+*
+*
+*    ENDIF.
+  ENDIF.
+
+*  zfmparavalsave2 'R'.
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

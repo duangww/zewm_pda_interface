@@ -1,0 +1,102 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD dorder_query.
+
+    DATA:BEGIN OF ls_in,
+           whnumwme TYPE /scwm/tmapwhnum-whnumwme,
+           vbeln    TYPE likp-vbeln,
+         END OF ls_in.
+    DATA: p_whnumerp TYPE /scwm/tmapwhnum-whnumerp.
+    TYPES:BEGIN OF ly_out,
+            vbeln  TYPE likp-vbeln,
+            posnr  TYPE lips-posnr,
+            matnr  TYPE lips-matnr,
+            maktx  TYPE makt-maktx,
+            charg  TYPE lips-charg,
+            lfimg  TYPE lips-lfimg,
+            meins  TYPE lips-vrkme,
+            mseh3  TYPE t006a-mseh3,
+*------------add by yakir at 29.01.2021 18:55:04------begin--*
+            mmeins TYPE mara-meins,
+            mmseh3 TYPE t006a-mseh3,
+            menge  TYPE lips-lfimg,
+*------------add by yakir at 29.01.2021 18:55:04------end--*
+
+          END OF ly_out.
+    DATA:lt_out TYPE TABLE OF ly_out,
+         wa_out TYPE ly_out.
+
+**********************************************************************
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_in ).
+
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = ls_in-vbeln
+      IMPORTING
+        output = ls_in-vbeln.
+
+
+    SELECT SINGLE whnumerp FROM /scwm/tmapwhnum
+      WHERE whnumwme = @ls_in-whnumwme
+      INTO @p_whnumerp.
+
+    SELECT vbeln,posnr,lips~matnr,charg,lfimg,vrkme AS meins,makt~maktx,t~mseh3,
+*------------add by yakir at 29.01.2021 18:53:53------begin--*
+      meins AS mmeins,tt~mseh3 AS mmseh3
+*------------add by yakir at 29.01.2021 18:53:53------end--*
+
+
+      FROM lips
+      LEFT JOIN makt ON makt~matnr = lips~matnr
+                     AND makt~spras = @sy-langu
+      LEFT JOIN t006a AS t ON t~msehi = lips~vrkme
+                           AND t~spras = @sy-langu
+*------------add by yakir at 29.01.2021 18:56:30------begin--*
+      LEFT JOIN t006a AS tt ON tt~msehi = lips~meins
+                           AND tt~spras = @sy-langu
+*------------add by yakir at 29.01.2021 18:56:30------end--*
+      WHERE lgnum = @p_whnumerp
+      AND lfimg <> 0
+      AND vbeln = @ls_in-vbeln
+      INTO CORRESPONDING FIELDS OF TABLE @lt_out.
+
+*------------add by yakir at 29.01.2021 18:56:51------begin--*
+    LOOP AT lt_out ASSIGNING FIELD-SYMBOL(<fs_out>).
+
+      IF <fs_out>-meins NE  <fs_out>-mmeins.
+        SELECT SINGLE SUM( cwquan )
+          FROM /scwm/ordim_c AS a
+          JOIN /scdl/db_refdoc AS b
+          ON a~rdocid EQ b~docid
+          AND a~ritmid EQ b~itemid
+          AND b~refdoccat EQ 'ERP'
+          WHERE b~refdocno EQ @<fs_out>-vbeln
+            AND substring( b~refitemno,5,6 ) EQ @<fs_out>-posnr
+            AND tostat EQ 'C'
+            AND tcode NE 'DLV_GM'
+         INTO @<fs_out>-menge.
+      ELSE.
+        <fs_out>-menge = <fs_out>-lfimg.
+      ENDIF.
+
+    ENDLOOP.
+*------------add by yakir at 29.01.2021 18:56:51------end--*
+
+
+    ev_json = /ui2/cl_json=>serialize( lt_out[] ).
+
+    CONCATENATE '{"ORDER_TABLE":' ev_json '}' INTO ev_json.
+
+    CLEAR:p_whnumerp,lt_out,ls_in.
+    REFRESH:lt_out.
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

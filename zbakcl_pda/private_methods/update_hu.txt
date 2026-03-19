@@ -1,0 +1,105 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD update_hu.
+
+    TYPES BEGIN OF ty_data.
+    TYPES lgnum   TYPE /scwm/lgnum.
+    TYPES huident TYPE /scwm/de_huident.
+    TYPES vfdat   TYPE /scwm/sled.
+    TYPES uname   TYPE xubname.
+    TYPES rsrc    TYPE /scwm/de_rsrc.
+    "TYPES zzdjdat    TYPE ze_djdat.
+    TYPES END OF ty_data.
+
+    DATA ls_data TYPE ty_data.
+
+    ""ADD BY VICKY 07.06.2021 09:31:33
+    "接口更新货架到货日期的栏位传入改到更新SAP待检日期栏位 ZZDJDAT
+
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_data ).
+
+    TRANSLATE ls_data-lgnum TO UPPER CASE.
+    TRANSLATE ls_data-uname TO UPPER CASE.
+    TRANSLATE ls_data-rsrc TO UPPER CASE.
+
+    ls_data-huident = |{ ls_data-huident ALPHA = IN }|.
+
+
+*    AUTHORITY-CHECK OBJECT 'Z_HUSLIFE'
+*     FOR USER ls_data-uname
+*     ID 'ACTVT' FIELD '01'.
+*    IF sy-subrc <> 0.
+*      gs_msg-msg_type = 'E'.
+*      gs_msg-msg_content = ls_data-uname && '没有权限'.
+*      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+*      RETURN.
+*    ENDIF.
+*----ADD by vicky AT 08.06.2021 16:47:40  begin-----------*
+
+    AUTHORITY-CHECK OBJECT 'ZQM_HUSLE2'
+    FOR USER ls_data-uname
+     ID '/SCWM/LGNU' FIELD ls_data-lgnum.
+    IF sy-subrc <> 0.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = ls_data-lgnum && '没有权限'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+*----add by vicky at 08.06.2021 16:47:40 end-----------*
+
+
+
+    SELECT SINGLE a~lgnum,a~huident,b~guid_parent,b~guid_stock
+      FROM /scwm/huhdr AS a
+      JOIN /scwm/quan AS b ON b~guid_parent EQ a~guid_hu
+
+      WHERE a~lgnum EQ @ls_data-lgnum
+      AND a~huident EQ @ls_data-huident
+      INTO @DATA(ls_quan).
+    IF sy-subrc NE 0.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '查询无数据'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    UPDATE /scwm/huhdr SET zzdjdat = ls_data-vfdat
+    WHERE guid_hu = ls_quan-guid_parent.
+    IF sy-subrc EQ 0.
+*      UPDATE /scwm/quan SET vfdat = ls_data-vfdat
+*      WHERE guid_parent = ls_quan-guid_parent
+*      AND guid_stock = ls_quan-guid_stock.
+*      IF sy-subrc = 0.
+      COMMIT WORK.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '更新成功'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+*      ELSE.
+*        ROLLBACK WORK.
+*        gs_msg-msg_type = 'E'.
+*        gs_msg-msg_content = '更新失败'.
+*        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+*      ENDIF.
+    ELSE.
+      ROLLBACK WORK.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '更新失败'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+    ENDIF.
+
+
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

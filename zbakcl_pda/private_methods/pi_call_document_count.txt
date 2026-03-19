@@ -1,0 +1,206 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD pi_call_document_count.
+
+
+
+    DATA:it_items_count TYPE /scwm/t_asp_oi_pi_item_proces,
+         ls_head        TYPE /lime/pi_head,
+         lt_items       TYPE /lime/pi_t_item_count,
+         ls_items       TYPE /lime/pi_item_count,
+         iv_sim_mode    TYPE c,
+         l_rc_severity  TYPE bapi_mtype,
+         lt_bapiret     TYPE bapiret2_t.
+
+**************
+    TYPES:BEGIN OF ty_in,
+
+            doc_number       TYPE /lime/pi_doc_number,
+            item_no          TYPE /lime/line_item_id,
+            type_parent      TYPE /scwm/pi_de_type_parent, "父对象
+            lgpla            TYPE /scwm/lgpla, "仓位
+
+
+            ind_loc_par_empt TYPE /scwm/pi_de_location_empty_ui, "空仓位
+            utem_no          TYPE /scwm/pi_de_type_item,   "项目类别
+            lvl              TYPE /scwm/pi_de_ui_level,    "级别
+            huident_item     TYPE /scwm/de_huident,        "处理单元
+            ind_hu_item_empt TYPE /scwm/pi_de_hu_item_empty_ui, "HU为空
+            ind_hu_item_comp TYPE /scwm/pi_de_hu_item_compl_ui, "HU完成
+            ind_hu_item_noex TYPE /scwm/pi_de_hu_item_notex_ui, "缺少HU
+            count_user       TYPE sy-uname,
+
+          END OF ty_in.
+
+*************
+    DATA lt_in TYPE TABLE OF ty_in.
+    DATA ls_in TYPE ty_in.
+
+
+    ""接口传入表处理
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+    REPLACE ALL OCCURRENCES OF '"data":'  IN lv_cdata WITH space.
+    SHIFT lv_cdata LEFT DELETING LEADING '{'.
+    SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_in ).
+
+
+
+    IF lt_in IS INITIAL.
+
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+
+    ENDIF.
+
+
+    LOOP AT lt_in INTO ls_in.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = ls_in-doc_number
+        IMPORTING
+          output = ls_in-doc_number.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = ls_in-huident_item
+        IMPORTING
+          output = ls_in-huident_item.
+      MODIFY lt_in FROM ls_in TRANSPORTING doc_number huident_item.
+
+    ENDLOOP.
+
+
+    READ TABLE lt_in INTO ls_in INDEX 1.
+
+    SELECT SINGLE a~lgnum,a~doc_year,b~doc_type
+    FROM /lime/pi_loghead AS a
+    JOIN /lime/pi_doc_it AS b ON a~guid_doc EQ b~guid_doc
+    AND b~item_no = 1
+    AND b~line_idx = 1
+    AND b~change_seq = 0
+    AND b~item_type = 'P'
+
+    WHERE a~doc_number EQ @ls_in-doc_number
+    INTO @DATA(ls_lgnum).
+
+
+    ls_head-process_type = 'SCWM'.
+    ls_head-lgnum = ls_lgnum-lgnum."" /LIME/PI_LOGHEAD   仓库
+
+    ls_items-doc_number = ls_in-doc_number.
+    ls_items-doc_year     = ls_lgnum-doc_year. "/LIME/PI_LOGHEAD
+    ls_items-item_no      = ls_in-item_no. "/LIME/PI_LOGITEM
+    ls_items-doc_type     = ls_lgnum-doc_type. "/LIME/PI_DOC_IT   DOC_TYPE
+    ls_items-process_type = 'SCWM'.
+    ls_items-lgnum        = ls_lgnum-lgnum. " /LIME/PI_LOGHEAD   仓库
+    "ls_items-post_item    = '1'.
+    ls_items-count_user   = ls_in-count_user.
+    ls_items-reason       = 'UPLD'. "/LIME/PI_DOC REASON
+    CONVERT DATE sy-datum
+    TIME sy-uzeit
+    INTO TIME STAMP ls_items-count_date
+    TIME ZONE sy-zonlo.
+
+    LOOP AT lt_in INTO ls_in.
+      DATA ls_data            TYPE /lime/pi_count_result_data.
+      DATA ls_item_result     TYPE /lime/pi_item_count_result.
+      TRANSLATE ls_in-lgpla TO UPPER CASE.
+
+      ls_data-lvl = ls_in-lvl.
+      ls_data-type_parent = 'L'.
+      ls_data-loc_parent-lgnum   = ls_lgnum-lgnum.
+
+      SELECT SINGLE lgtyp
+      FROM /scwm/lagp
+      WHERE lgnum = @ls_lgnum-lgnum
+      AND lgpla = @ls_in-lgpla
+      INTO @ls_data-loc_parent-lgtyp.
+
+      ls_data-loc_parent-lgpla   = ls_in-lgpla."/LIME/PI_IT_BIZ
+
+
+      ls_data-ind_loc_par_empt  =  ls_in-ind_loc_par_empt."是否为空仓位
+      ls_data-ind_hu_item_empt = ls_in-ind_hu_item_empt.
+      ls_data-ind_hu_item_comp = ls_in-ind_hu_item_comp.
+      ls_data-ind_hu_item_noex = ls_in-ind_hu_item_noex.
+
+      ls_data-type_item = ls_in-utem_no."项目类别 默认'H''
+      ls_data-hu_item-lgnum_hu =  ls_lgnum-lgnum." /LIME/PI_LOGHEAD   仓库
+      ls_data-hu_item-huident  = ls_in-huident_item.
+
+
+      ls_item_result-data = ls_data.
+      APPEND ls_item_result TO ls_items-t_item_result.
+
+    ENDLOOP.
+    APPEND ls_items TO lt_items.
+
+
+    iv_sim_mode = 'X'.
+    CALL FUNCTION '/SCWM/PI_CALL_DOCUMENT_COUNT'
+      EXPORTING
+        is_head       = ls_head
+        it_item       = lt_items
+        i_sim_mode    = iv_sim_mode
+        iv_save_pack  = space
+      IMPORTING
+        e_rc_severity = l_rc_severity
+        et_bapiret    = lt_bapiret.
+
+    IF l_rc_severity = 'S'.
+
+      iv_sim_mode = ''.
+      CALL FUNCTION '/SCWM/PI_CALL_DOCUMENT_COUNT'
+        EXPORTING
+          is_head       = ls_head
+          it_item       = lt_items
+          i_sim_mode    = iv_sim_mode
+          iv_save_pack  = space
+        IMPORTING
+          e_rc_severity = l_rc_severity
+          et_bapiret    = lt_bapiret.
+
+      IF l_rc_severity = 'S'.
+        COMMIT WORK AND WAIT.
+        gs_msg-msg_type = l_rc_severity.
+        gs_msg-msg_content = lt_bapiret[ 1 ]-message.
+        gs_msg-ref_doc = lt_bapiret[ 1 ]-message_v1.
+      ELSE.
+        ROLLBACK WORK.
+        gs_msg-msg_type = l_rc_severity.
+        gs_msg-ref_doc = lt_bapiret[ 1 ]-message_v1.
+        LOOP AT lt_bapiret INTO DATA(ls_bapiret) .
+          gs_msg-msg_content = gs_msg-msg_content && ls_bapiret-message.
+
+        ENDLOOP.
+      ENDIF.
+
+
+
+    ELSE.
+
+      gs_msg-msg_type = l_rc_severity.
+      gs_msg-ref_doc = lt_bapiret[ 1 ]-message_v1.
+      LOOP AT lt_bapiret INTO ls_bapiret.
+
+        gs_msg-msg_content = gs_msg-msg_content && ls_bapiret-message && '.'.
+      ENDLOOP.
+
+    ENDIF.
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

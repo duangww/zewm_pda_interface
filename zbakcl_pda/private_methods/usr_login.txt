@@ -1,0 +1,82 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD usr_login.
+
+    DATA:BEGIN OF ls_login,
+           user     TYPE xubname,
+           password TYPE xubcode,
+         END OF ls_login.
+
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_login ).
+
+    TRANSLATE ls_login-user TO UPPER CASE.
+
+    CALL FUNCTION 'SUSR_CHECK_LOGON_DATA'
+      EXPORTING
+        auth_method                 = cn_p
+        userid                      = ls_login-user
+        password                    = ls_login-password
+      EXCEPTIONS
+        user_or_password_incorrect  = 1
+        user_locked                 = 2
+        user_outside_validity       = 3
+        user_requires_snc_logon     = 4
+        password_attempts_limited   = 5
+        password_logon_disabled     = 6
+        user_has_no_password        = 7
+        initialpassword_expired     = 8
+        productive_password_expired = 9
+        auth_method_requires_snc    = 10
+        ticket_logon_disabled       = 11
+        ticket_encoding_error       = 12
+        ticket_issuer_not_verified  = 13
+        ticket_issuer_not_trusted   = 14
+        ticket_expired              = 15
+        x509_logon_disabled         = 16
+        x509_encoding_error         = 17
+        no_userid_for_aliasname     = 18
+        extid_logon_disabled        = 19
+        no_mapping_found            = 20
+        mapping_ambiguous           = 21
+        internal_error              = 22
+        auth_method_not_supported   = 23
+        logon_data_incomplete       = 24
+        OTHERS                      = 25.
+
+    IF sy-subrc EQ 0.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '用户校验通过！'.
+      SELECT SINGLE c~pamsg AS spld,b~parva,d~parva AS lgnum
+        FROM usr01 AS a
+        LEFT JOIN usr05 AS b ON a~bname EQ b~bname
+                AND b~parid EQ @cn_barcode
+        LEFT JOIN usr05 AS d ON a~bname EQ d~bname
+                AND d~parid EQ @cn_lgn
+        LEFT JOIN tsp03 AS c ON a~spld EQ c~padest
+        INTO CORRESPONDING FIELDS OF @gs_msg
+        WHERE a~bname EQ @ls_login-user.
+
+
+    ELSE.
+      gs_msg-msg_type = 'E'.
+*      MESSAGE ID sy-msgid TYPE gs_msg-msg_type NUMBER sy-msgno
+*              INTO gs_msg-msg_content
+*              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+*      CONCATENATE sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO gs_msg-msg_content.
+      gs_msg-msg_content = '用户名或密码错误！'.
+    ENDIF.
+
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

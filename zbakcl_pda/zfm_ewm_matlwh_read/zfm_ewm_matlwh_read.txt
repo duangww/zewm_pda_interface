@@ -1,0 +1,87 @@
+FUNCTION zfm_ewm_matlwh_read.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  TABLES
+*"      IT_DATA STRUCTURE  ZEWMS_EWMMAT
+*"      ET_DATA STRUCTURE  ZEWMS_EWMMAT
+*"----------------------------------------------------------------------
+
+
+  DATA lr_matnr TYPE RANGE OF matnr.
+  DATA lr_werks TYPE RANGE OF werks_d.
+
+  DATA cs_matlwh      TYPE /sapapo/matio_wh.
+  DATA lv_matid TYPE /sapapo/matkey-matid.
+
+
+  DATA: lt_matlwh_id TYPE /sapapo/dm_matlwh_id_tab,
+        ls_matlwh_id LIKE LINE OF lt_matlwh_id.
+  DATA: lt_matlwh_out TYPE TABLE OF /sapapo/matlwh_out.
+
+  REFRESH et_data.
+
+  SORT it_data[] BY matnr werks.
+  DELETE ADJACENT DUPLICATES FROM it_data[] COMPARING matnr werks.
+
+  lr_matnr = VALUE #( FOR wa IN it_data[] ( sign = 'I' option = 'EQ' low = wa-matnr ) ).
+  lr_werks = VALUE #( FOR wa IN it_data[] ( sign = 'I' option = 'EQ' low = wa-werks ) ).
+
+  CHECK lr_matnr IS NOT INITIAL AND lr_werks IS NOT INITIAL.
+
+  SELECT a~werks,b~partner_guid
+  FROM lfa1 AS a
+  JOIN but000 AS b ON b~partner EQ a~lifnr
+  WHERE werks IN @lr_werks
+  INTO TABLE @DATA(lt_werks).
+
+  SELECT matnr,matid
+  FROM /sapapo/matkey
+  INTO TABLE @DATA(lt_matnr)
+        WHERE matnr IN @lr_matnr.
+
+  IF sy-subrc = 0.
+    MOVE-CORRESPONDING it_data[] TO et_data[].
+    LOOP AT it_data.
+      CLEAR:ls_matlwh_id,lt_matlwh_id.
+
+      READ TABLE lt_matnr WITH KEY matnr = it_data-matnr INTO DATA(ls_matnr).
+      IF sy-subrc = 0.
+        ls_matlwh_id-matid = ls_matnr-matid.
+
+        READ TABLE lt_werks WITH KEY werks = it_data-werks INTO DATA(ls_werks).
+        IF sy-subrc = 0.
+          ls_matlwh_id-entitled_id      = ls_werks-partner_guid.
+          APPEND ls_matlwh_id TO lt_matlwh_id.
+        ENDIF.
+
+      ENDIF.
+
+      CALL FUNCTION '/SAPAPO/PROD_LWH_READ'
+        EXPORTING
+          it_matlwh_id  = lt_matlwh_id
+        TABLES
+          et_matlwh_out = lt_matlwh_out
+        EXCEPTIONS
+          not_qualified = 1
+          OTHERS        = 2.
+
+      IF lt_matlwh_out IS INITIAL.
+        """没有启用EWM管理
+        DELETE et_data[] WHERE matnr = it_data-matnr AND werks = it_data-werks.
+      ELSE.
+        LOOP AT lt_matlwh_out
+        ASSIGNING FIELD-SYMBOL(<fs_matlwh>)
+        WHERE procprfl IS NOT INITIAL.
+          """没有启用EWM管理
+          DELETE et_data[] WHERE matnr = it_data-matnr AND werks = it_data-werks.
+          EXIT.
+        ENDLOOP.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  "传出的都是启用EWM管理的物料
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

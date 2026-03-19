@@ -1,0 +1,101 @@
+FUNCTION zfm_ewm_dn_qty_mod.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(IV_DN) TYPE  VBELN_VL
+*"     VALUE(IV_LGNUM) TYPE  /SCWM/LGNUM
+*"     VALUE(IT_QTY) TYPE  ZEWMT_DN_QTY
+*"----------------------------------------------------------------------
+  TYPES BEGIN OF ty_key.
+  TYPES docid TYPE /scdl/db_refdoc-docid.
+  TYPES END OF ty_key.
+  DATA lt_key TYPE TABLE OF ty_key.
+  DATA lv_as TYPE string.
+  DATA lt_rec TYPE TABLE OF /scdl/s_sp_a_head.
+  DATA lt_qty TYPE /scdl/t_sp_a_item_quantity.
+  DATA et_rec TYPE /scdl/t_sp_a_item_quantity.
+*  DATA lo_dn_i TYPE REF TO /scdl/cl_sp.
+  DO.
+    SELECT DISTINCT ( a~docid )
+      FROM /scdl/db_refdoc AS a
+      INTO TABLE @lt_key
+      WHERE refdoccat EQ 'ERP'
+        AND refitemno EQ 0
+        AND refdocno EQ @iv_dn.
+    IF sy-subrc EQ 0 OR sy-index EQ 20.
+      EXIT.
+    ELSE.
+      WAIT UP TO 1 SECONDS.
+    ENDIF.
+  ENDDO.
+
+
+  CHECK lt_key IS NOT INITIAL.
+
+  /scwm/cl_tm=>set_lgnum( EXPORTING iv_lgnum = iv_lgnum ).
+
+  DATA(lo_dn_i) = NEW /scdl/cl_sp_prd_inb(
+            iv_doccat      = /scdl/if_dl_doc_c=>sc_doccat_inb_prd
+            iv_mode        = /scdl/cl_sp=>sc_mode_classic )      .
+
+  lv_as = '/SCDL/S_SP_A_HEAD'.
+
+  CALL METHOD lo_dn_i->/scdl/if_sp1_locking~lock(
+    EXPORTING
+      inkeys       = lt_key
+      aspect       = lv_as
+      lockmode     = /scdl/if_sp1_locking=>sc_exclusive_lock
+    IMPORTING
+      rejected     = DATA(lv_rejected)
+      return_codes = DATA(l_code) ).
+
+  CHECK lv_rejected NE abap_true.
+
+  LOOP AT it_qty
+    INTO DATA(ls_qty).
+    DATA(lv_item) = NEW /scdl/dl_refitemno( ls_qty-dn_item ).
+
+    SELECT SINGLE docid,itemid
+      FROM /scdl/db_refdoc AS a
+      INTO @DATA(ls_doc)
+      WHERE refdoccat EQ 'ERP'
+        AND refdocno EQ @iv_dn
+        AND refitemno EQ @lv_item->*.
+
+    IF sy-subrc NE 0.
+      RETURN.
+    ELSE.
+      lt_qty = VALUE #(
+      BASE lt_qty
+      ( docid = ls_doc-docid
+        itemid = ls_doc-itemid
+        qty = ls_qty-qty
+        uom = ls_qty-uom ) ).
+    ENDIF.
+
+  ENDLOOP.
+
+  lv_as = '/SCDL/S_SP_A_ITEM_QUANTITY'.
+
+  lo_dn_i->/scdl/if_sp1_aspect~update(
+  EXPORTING aspect = lv_as
+            inrecords = lt_qty
+*            inkeys = lt_key
+*            action = 'UPD_ITEM_QUANTITY'
+*            inparam = lt_qty
+  IMPORTING return_codes = DATA(lt_ret)
+            rejected = lv_rejected
+            outrecords = et_rec
+            ).
+
+  CHECK NOT line_exists( lt_ret[ failed = abap_true ] ).
+
+  CALL METHOD lo_dn_i->/scdl/if_sp1_transaction~save( abap_true ).
+  COMMIT WORK AND WAIT.
+  CALL METHOD lo_dn_i->/scdl/if_sp1_transaction~cleanup(
+      reason = /scdl/if_sp1_transaction=>sc_cleanup_commit ).
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

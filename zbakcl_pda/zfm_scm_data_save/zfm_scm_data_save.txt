@@ -1,0 +1,123 @@
+FUNCTION zfm_scm_data_save.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(IV_JSON) TYPE  STRING
+*"     VALUE(IV_REQUEST_ID) TYPE  ZREQUEST_ID OPTIONAL
+*"----------------------------------------------------------------------
+
+  DATA lv_token TYPE string.
+  DATA lv_url TYPE string.
+  DATA: ls_log TYPE ztpda_jk_log.
+
+  TYPES: BEGIN OF ty_returnvo,
+           barcode TYPE string,
+           suclogo TYPE string,
+           message TYPE string,
+         END OF ty_returnvo.
+
+  TYPES: BEGIN OF ty_resp,
+           msg          TYPE string,
+           code         TYPE string,
+           succ         TYPE string,
+           oper         TYPE string,
+           returnvolist TYPE TABLE OF ty_returnvo WITH EMPTY KEY,
+         END OF ty_resp.
+
+  DATA: ls_resp TYPE ty_resp.
+
+  CALL FUNCTION 'ZFM_SCM_TOKEN'
+    IMPORTING
+      ev_token = lv_token
+      ev_url   = lv_url.
+
+  CHECK lv_token IS NOT INITIAL.
+
+  lv_url = lv_url && 'api/v1/pdaOrder/updateStatus'.
+
+* 调用接口.
+
+  CALL METHOD cl_http_client=>create_by_url
+    EXPORTING
+      url    = lv_url
+    IMPORTING
+      client = DATA(lo_http_client).
+
+* 设置访问参数
+
+
+  lo_http_client->request->set_method( 'POST').
+  lo_http_client->request->set_header_field( name = 'Content-Type' value = 'application/json' ).
+  lo_http_client->request->set_header_field( name = 'Authorization' value = lv_token ).
+  lo_http_client->request->set_cdata( data = iv_json ).
+
+* 发送请求，获取token
+  CALL METHOD lo_http_client->send
+    EXCEPTIONS
+      http_communication_failure = 1
+      http_invalid_state         = 2.
+
+* Get response from HTTP
+  CALL METHOD lo_http_client->receive
+    EXCEPTIONS
+      http_communication_failure = 1
+      http_invalid_state         = 2
+      http_processing_failed     = 3.
+
+  IF sy-subrc NE 0.
+    lo_http_client->get_last_error( IMPORTING code = DATA(lv_error_code) message = DATA(lv_message) ).
+
+    ls_log-type = 'E'.
+    ls_log-message = lv_message.
+
+  ENDIF.
+
+* 获取状态以及response
+  lo_http_client->response->get_status( IMPORTING code = DATA(lv_code) reason = DATA(lv_reason) ).
+  DATA(lv_cdata) = lo_http_client->response->get_cdata( ).
+
+  lo_http_client->close(
+    EXCEPTIONS
+      http_invalid_state = 1
+      OTHERS             = 2
+  ).
+
+  ls_log-response_data = lv_cdata.
+
+  /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata
+       CHANGING data = ls_resp ).
+
+  IF ls_resp-succ = abap_true.
+    ls_log-type = 'S'.
+  ELSE.
+    ls_log-type = 'E'.
+  ENDIF.
+
+  IF ls_log-message IS INITIAL.
+    ls_log-message = ls_resp-msg.
+  ENDIF.
+
+
+  UPDATE ztpda_jk_log
+    SET type = ls_log-type
+        message = ls_log-message
+        response_data  = ls_log-response_data
+    WHERE request_id = iv_request_id
+    AND action = 'ZFM_SCM_DATA_SAVE'.
+  IF sy-subrc NE 0.
+    UPDATE ztpda_jk_loga         "更新归档日志表
+    SET type = ls_log-type
+        message = ls_log-message
+        response_data  = ls_log-response_data
+    WHERE request_id = iv_request_id
+    AND action = 'ZFM_SCM_DATA_SAVE'.
+
+  ENDIF.
+
+
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

@@ -1,0 +1,123 @@
+FUNCTION zfm_scmewm_num.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  TABLES
+*"      ET_NUM STRUCTURE  ZSCMS004 OPTIONAL
+*"      IT_NUM STRUCTURE  ZSCMS005 OPTIONAL
+*"----------------------------------------------------------------------
+  DATA:lv_range_nr TYPE inri-nrrangenr.
+
+  REFRESH et_num.
+  DELETE it_num[] WHERE pacty = space OR count = space.
+  IF lines( it_num[] ) = 0.
+    EXIT.
+
+  ENDIF.
+
+*------------add by yakir at 04.12.2019 08:59:29------begin--*
+  ""解锁
+*  DO.
+*    IF sy-index > 3.
+*      EXIT.
+*    ENDIF.
+*    CALL FUNCTION 'NUMBER_RANGE_DEQUEUE'
+*      EXPORTING
+*        object           = 'ZEWM01'
+*      EXCEPTIONS
+*        object_not_found = 1
+*        OTHERS           = 2.
+*    IF sy-subrc NE 0.
+*      WAIT UP TO 1 SECONDS.
+*    ELSE.
+*      EXIT.
+*    ENDIF.
+*  ENDDO.
+*------------add by yakir at 04.12.2019 08:59:29------end--*
+
+  ""加锁
+  DO.
+    IF sy-index > 15.
+      DATA(lv_flag) = abap_true.
+      EXIT.
+    ENDIF.
+    CALL FUNCTION 'NUMBER_RANGE_ENQUEUE'
+      EXPORTING
+        object           = 'ZEWM01'
+      EXCEPTIONS
+        foreign_lock     = 1
+        object_not_found = 2
+        system_failure   = 3
+        OTHERS           = 4.
+
+    IF sy-subrc NE 0.
+      WAIT UP TO 1 SECONDS.
+    ELSE.
+      lv_flag = space.
+      EXIT.
+    ENDIF.
+  ENDDO.
+
+  IF lv_flag EQ abap_true.
+    CALL FUNCTION 'NUMBER_RANGE_DEQUEUE'
+      EXPORTING
+        object           = 'ZEWM01'
+      EXCEPTIONS
+        object_not_found = 1
+        OTHERS           = 2.
+    CALL FUNCTION 'NUMBER_RANGE_ENQUEUE'
+      EXPORTING
+        object           = 'ZEWM01'
+      EXCEPTIONS
+        foreign_lock     = 1
+        object_not_found = 2
+        system_failure   = 3
+        OTHERS           = 4.
+    IF sy-subrc EQ 0.
+      CLEAR lv_flag.
+    ENDIF.
+  ENDIF.
+
+
+  IF lv_flag EQ space.
+    LOOP AT it_num.
+
+      CASE it_num-pacty.
+        WHEN '01'.
+          lv_range_nr = '1'.
+        WHEN '02'.
+          lv_range_nr = '2'.
+        WHEN '03'.
+          lv_range_nr = '3'.
+        WHEN '04'.
+          lv_range_nr = '4'.
+        WHEN OTHERS.
+          CONTINUE.
+      ENDCASE.
+      DO  it_num-count TIMES.
+        CALL FUNCTION 'NUMBER_GET_NEXT'
+          EXPORTING
+            nr_range_nr   = lv_range_nr "在编号范围中分配的序列号
+            object        = 'ZEWM01' "编码对象名称
+            ignore_buffer = 'X' ""防跳号
+          IMPORTING
+            number        = et_num-numbe. ""生成流水码
+        et_num-pacty = it_num-pacty.
+        APPEND et_num.
+      ENDDO.
+    ENDLOOP.
+
+  ENDIF.
+  ""解锁
+  CALL FUNCTION 'NUMBER_RANGE_DEQUEUE'
+    EXPORTING
+      object           = 'ZEWM01'
+    EXCEPTIONS
+      object_not_found = 1
+      OTHERS           = 2.
+
+
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

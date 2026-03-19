@@ -1,0 +1,235 @@
+FUNCTION zfm_ewm_oth_import.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(IW_IN) TYPE  ZEWMS_GOODSMVT_CREATE OPTIONAL
+*"     VALUE(IT_IN) TYPE  ZEWMT_GOODSMVT_CREATE OPTIONAL
+*"     VALUE(IV_CHARG) TYPE  CHAR1 OPTIONAL
+*"  CHANGING
+*"     VALUE(EW_GITEM) TYPE  BAPI2017_GM_ITEM_CREATE OPTIONAL
+*"----------------------------------------------------------------------
+  CASE iw_in-type.
+      """" WHEN '101'.
+      """"
+      """"   "entry_qnt  entry_uom
+      """"   CALL FUNCTION 'ZFM_EWM_OTH_INBOUND_CAL'
+      """"     EXPORTING
+      """"       it_in    = it_in
+      """"       is_in    = iw_in
+      """"       iv_charg = iv_charg
+      """"     CHANGING
+      """"       es_gitem = ew_gitem.
+      """"
+      """"   CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      """"     EXPORTING
+      """"       input  = iw_in-aufnr
+      """"     IMPORTING
+      """"       output = iw_in-aufnr.
+      """"
+      """"   SELECT SINGLE autyp,werks
+      """"   FROM aufk
+      """"   WHERE aufnr EQ @iw_in-aufnr
+      """"   INTO @DATA(ls_aufk).
+      """"   IF sy-subrc NE 0.
+      """"     CLEAR ls_aufk.
+      """"   ENDIF.
+      """"
+      """"   ew_gitem-move_type  = '101'.
+      """"
+      """"   ew_gitem-mvt_ind    = 'F'.
+      """"   ew_gitem-orderid    = iw_in-aufnr."生产订单
+      """"   ew_gitem-material_long   = iw_in-matnr."物料
+      """"
+      """"   ew_gitem-plant = ls_aufk-werks.
+      """"   ew_gitem-stge_loc   = iw_in-lgort."库存地点
+      """"   ew_gitem-batch      = iw_in-charg."批次
+      """"   IF iv_charg = ''.
+      """"     ew_gitem-prod_date = iw_in-hsdat.
+      """"   ENDIF.
+
+    WHEN '262'.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = iw_in-aufnr
+        IMPORTING
+          output = iw_in-aufnr.
+      SELECT SINGLE autyp,werks
+      FROM aufk
+      WHERE aufnr EQ @iw_in-aufnr
+      INTO @DATA(ls_aufk).
+      IF sy-subrc NE 0.
+        CLEAR ls_aufk.
+      ENDIF.
+
+      ew_gitem-move_type  = '262'.
+      ew_gitem-plant      = ls_aufk-werks."工厂
+      ew_gitem-stge_loc   = iw_in-lgort."库存地点
+      ew_gitem-batch      = iw_in-charg."批次
+      ew_gitem-material_long   = iw_in-matnr."物料
+
+      "entry_qnt  entry_uom
+      CALL FUNCTION 'ZFM_EWM_OTH_INBOUND_CAL'
+        EXPORTING
+          it_in    = it_in
+          is_in    = iw_in
+          iv_charg = iv_charg
+        CHANGING
+          es_gitem = ew_gitem.
+
+
+      ew_gitem-xstob  = 'X'."
+      ew_gitem-orderid      = iw_in-aufnr."生产订单
+
+      SELECT SINGLE rsnum,rspos,rsart
+      FROM resb
+      WHERE matnr = @ew_gitem-material_long
+      AND aufnr = @ew_gitem-orderid
+      INTO @DATA(ls_resb).
+      IF  sy-subrc = 0.
+        ew_gitem-reserv_no = ls_resb-rsnum.  "预留/相关需求的编号
+        ew_gitem-res_item = ls_resb-rspos . "预留 / 相关需求的项目编号
+        ew_gitem-res_type = ls_resb-rsart . "记录类型
+      ENDIF.
+      IF iv_charg = ''.
+        ew_gitem-prod_date = iw_in-hsdat.
+      ENDIF.
+
+    WHEN '202'.
+
+      ew_gitem-costcenter = iw_in-kostl."成本中心
+      ew_gitem-move_type  = '202'.
+      ew_gitem-plant = iw_in-werks.
+      ew_gitem-mvt_ind    = ''.
+      ew_gitem-material_long   = iw_in-matnr."物料
+
+      "entry_qnt  entry_uom
+      CALL FUNCTION 'ZFM_EWM_OTH_INBOUND_CAL'
+        EXPORTING
+          it_in    = it_in
+          is_in    = iw_in
+          iv_charg = iv_charg
+        CHANGING
+          es_gitem = ew_gitem.
+
+      ew_gitem-stge_loc   = iw_in-lgort."库存地点
+      ew_gitem-batch      = iw_in-charg."批次
+      IF iv_charg = ''.
+        ew_gitem-prod_date = iw_in-hsdat.
+      ENDIF.
+
+    WHEN  'Z12'.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = iw_in-aufnr
+        IMPORTING
+          output = iw_in-aufnr.
+      ew_gitem-orderid    = iw_in-aufnr."内部订单
+      ew_gitem-costcenter = iw_in-kostl."成本中心
+      ew_gitem-move_type  = 'Z12'.
+      ew_gitem-plant = iw_in-werks.
+      ew_gitem-mvt_ind    = ''.
+      ew_gitem-material_long   = iw_in-matnr."物料
+
+      "entry_qnt  entry_uom
+      CALL FUNCTION 'ZFM_EWM_OTH_INBOUND_CAL'
+        EXPORTING
+          it_in    = it_in
+          is_in    = iw_in
+          iv_charg = iv_charg
+        CHANGING
+          es_gitem = ew_gitem.
+
+      ew_gitem-stge_loc   = iw_in-lgort."库存地点
+      ew_gitem-batch      = iw_in-charg."批次
+      IF iv_charg = ''.
+        ew_gitem-prod_date = iw_in-hsdat.
+      ENDIF.
+    WHEN '311'.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = iw_in-aufnr
+        IMPORTING
+          output = iw_in-aufnr.
+
+      ew_gitem-orderid    = iw_in-aufnr."内部订单
+      ew_gitem-move_type  = '311'.
+
+      ew_gitem-mvt_ind    = ''.
+      ew_gitem-plant = iw_in-werks."发出工厂
+      ew_gitem-stge_loc   = iw_in-lgort."发出库存地点
+      ew_gitem-material_long   = iw_in-matnr." 发出物料
+
+      IF iv_charg = 'X'.
+        ew_gitem-entry_qnt  = REDUCE #( INIT x TYPE menge_d
+        FOR wa IN it_in
+        WHERE ( charg EQ iw_in-charg )
+        NEXT x = x + wa-menge ).
+        ew_gitem-entry_uom  = iw_in-meins."单位
+      ELSE.
+        ew_gitem-entry_qnt  = REDUCE #( INIT x TYPE menge_d
+        FOR wa IN it_in
+        WHERE ( hsdat EQ iw_in-hsdat )
+        NEXT x = x + wa-menge ).
+        ew_gitem-entry_uom  = iw_in-meins."单位
+      ENDIF.
+
+      ew_gitem-batch      = iw_in-charg."批次
+      ew_gitem-move_plant = iw_in-werks."接收工厂
+      ew_gitem-move_stloc   = iw_in-i_lgort."接收库存地点
+      ew_gitem-move_mat   = iw_in-matnr." 接收物料
+      IF iv_charg = ''.
+        ew_gitem-prod_date = iw_in-hsdat.
+      ENDIF.
+
+    WHEN '315'.
+
+      ew_gitem-move_type  = '315'.
+
+
+      ew_gitem-plant = iw_in-werks."发出工厂
+      ew_gitem-stge_loc   = iw_in-lgort."发出库存地点 /313 的接受库存
+      ew_gitem-material_long   = iw_in-matnr." 发出物料
+
+      "entry_qnt  entry_uom
+      CALL FUNCTION 'ZFM_EWM_OTH_INBOUND_CAL'
+        EXPORTING
+          it_in    = it_in
+          is_in    = iw_in
+          iv_charg = iv_charg
+        CHANGING
+          es_gitem = ew_gitem.
+
+      ew_gitem-batch      = iw_in-charg."批次
+      IF iv_charg = ''.
+        ew_gitem-prod_date = iw_in-hsdat.
+      ENDIF.
+
+    WHEN '531'.
+      ew_gitem-move_type  = '531'.
+      ew_gitem-plant      = iw_in-werks."工厂
+      ew_gitem-stge_loc   = iw_in-lgort."库存地点
+      ew_gitem-batch      = iw_in-charg."批次
+      ew_gitem-material_long   = iw_in-matnr."物料
+      ew_gitem-orderid      = iw_in-aufnr."生产订单
+
+      "entry_qnt  entry_uom
+      CALL FUNCTION 'ZFM_EWM_OTH_INBOUND_CAL'
+        EXPORTING
+          it_in    = it_in
+          is_in    = iw_in
+          iv_charg = iv_charg
+        CHANGING
+          es_gitem = ew_gitem.
+
+
+
+  ENDCASE.
+
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

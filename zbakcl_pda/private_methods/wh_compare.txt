@@ -1,0 +1,63 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD wh_compare.
+
+
+    DATA:BEGIN OF ls_comp,
+           lgnum   TYPE /scwm/lgnum,
+           lgpla   TYPE /scwm/lagp-lgpla,
+           lgtyp   TYPE /scwm/lagp-lgtyp,
+           lgber   TYPE /scwm/lagp-lgber,
+           lgpla_c TYPE /scwm/lagp-lgpla,
+         END OF ls_comp.
+    DATA(lv_flag) = space.
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = ls_comp ).
+
+    IF ls_comp-lgpla IS NOT INITIAL.
+
+      SELECT SINGLE lgtyp,lgber
+        FROM /scwm/lagp
+        INTO @DATA(ls_lagp)
+        WHERE lgnum EQ @ls_comp-lgnum
+          AND lgpla EQ @ls_comp-lgpla.
+
+      IF ls_comp-lgtyp IS NOT INITIAL
+        AND ls_lagp-lgtyp NE ls_comp-lgtyp.
+        lv_flag = abap_true.
+      ENDIF.
+
+      IF ls_comp-lgber IS NOT INITIAL
+        AND ls_lagp-lgber NE ls_comp-lgber.
+        lv_flag = abap_true.
+      ENDIF.
+
+      IF ls_comp-lgpla_c IS NOT INITIAL
+        AND ls_comp-lgpla NE ls_comp-lgpla_c.
+        lv_flag = abap_true.
+      ENDIF.
+
+    ENDIF.
+
+    IF lv_flag EQ abap_true.
+      gs_msg-msg_type = 'W'.
+      gs_msg-msg_content = '数据不匹配！'.
+    ELSE.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '数据匹配成功！'.
+    ENDIF.
+
+
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

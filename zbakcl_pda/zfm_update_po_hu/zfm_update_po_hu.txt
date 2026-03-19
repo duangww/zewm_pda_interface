@@ -1,0 +1,129 @@
+FUNCTION zfm_update_po_hu.
+*"----------------------------------------------------------------------
+*"*"更新函数模块：
+*"
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(IS_DOC) TYPE  BAPI2017_GM_HEAD_RET
+*"  TABLES
+*"      IT_DATA STRUCTURE  ZEWMS004
+*"----------------------------------------------------------------------
+
+  DATA ls_barcode TYPE zewmbarcode.
+  DATA ls_asso TYPE zzbcrl_hu.
+  DATA lv_hu TYPE zewmbarcode-hubox.
+
+  LOOP AT it_data INTO DATA(ls_migo).
+
+*****    ""对于条码初始化，如果 2 4 开头的条码，且barcode表已有数据，则更新数量 状态即可
+*****    CALL FUNCTION 'CONVERSION_EXIT_HUID_OUTPUT'
+*****      EXPORTING
+*****        input  = ls_migo-hu_son
+*****      IMPORTING
+*****        output = lv_hu.
+*****    IF lv_hu+0(1) EQ '2'
+*****      OR lv_hu+0(1) EQ '4' .
+*****
+*****      SELECT COUNT(*)
+*****        FROM zewmbarcode
+*****        WHERE huident = ls_migo-hu_son
+*****          AND lgnum = ls_migo-lgnum.
+*****      IF sy-subrc EQ 0.
+*****        UPDATE zewmbarcode
+*****        SET status = 'S'
+*****            bz_menge = ls_migo-menge
+*****            mblnr_r = is_doc-mat_doc
+*****            mjahr_r = is_doc-doc_year
+*****        WHERE huident EQ ls_migo-hu_son
+*****        AND lgnum EQ ls_migo-lgnum.
+*****
+*****        UPDATE zewmbarcode
+*****        SET status = 'S'
+*****            mblnr_r = is_doc-mat_doc
+*****            mjahr_r = is_doc-doc_year
+*****        WHERE huident EQ ls_migo-hu_par
+*****        AND lgnum EQ ls_migo-lgnum.
+*****        CONTINUE.
+*****      ENDIF.
+*****
+*****    ENDIF.
+
+
+    CLEAR ls_asso.
+    ls_asso-lgnum = ls_migo-lgnum.
+    ls_asso-hupal = ls_migo-hupal.
+    ls_asso-hubox = ls_migo-hubox.
+    ls_asso-paltyp = ls_migo-paltyp.
+    ls_asso-boxtyp = ls_migo-boxtyp.
+    ls_asso-erdat = sy-datum.
+    ls_asso-ertim = sy-uzeit.
+    ls_asso-ernam = sy-uname.
+    MODIFY zzbcrl_hu FROM ls_asso.
+
+    CLEAR ls_barcode.
+    ls_barcode-lgnum   = ls_migo-lgnum.
+    ls_barcode-hubox = ls_migo-hubox.
+    ls_barcode-ebeln = ls_migo-ebeln.
+    ls_barcode-ebelp = ls_migo-ebelp.
+    ls_barcode-matnr = ls_migo-matnr.
+    ls_barcode-maktx = ls_migo-maktx.
+    ls_barcode-erdat = sy-datum.
+    ls_barcode-ertim = sy-uzeit.
+    ls_barcode-ernam = sy-uname.
+    ls_barcode-hutyp = ls_migo-boxtyp.
+*    ls_barcode-wepos = abap_true.
+    ls_barcode-meins = ls_migo-meins.
+    ls_barcode-menge = ls_migo-menge.
+    ls_barcode-hsdat = ls_migo-hsdat.
+    ls_barcode-lgpla = ls_migo-lgpla.
+    ls_barcode-charg = ls_migo-charg.
+    ls_barcode-licha = ls_migo-licha.
+*    ls_barcode-status = 'S'.
+*    ls_barcode-werks = ls_migo-werks.
+*    ls_barcode-grdat = sy-datum.
+*    ls_barcode-mblnr_r = is_doc-mat_doc.
+*    ls_barcode-mjahr_r = is_doc-doc_year.
+
+*------------add by yakir at 30.10.2020 15:00:08------begin--*
+*    SELECT SINGLE insmk
+*      FROM matdoc
+*      INTO ls_barcode-stk_typ
+*      WHERE mblnr EQ is_doc-mat_doc
+*        AND mjahr EQ is_doc-doc_year.
+*------------add by yakir at 30.10.2020 15:00:08------end--*
+
+    MODIFY zewmbarcode FROM ls_barcode.
+
+    IF ls_migo-paltyp IS NOT INITIAL.
+      CLEAR ls_barcode.
+      ls_barcode-lgnum   = ls_migo-lgnum.
+      ls_barcode-hubox = ls_migo-hupal.
+      ls_barcode-erdat = sy-datum.
+      ls_barcode-ertim = sy-uzeit.
+      ls_barcode-ernam = sy-uname.
+      ls_barcode-hutyp = ls_migo-paltyp.
+      ls_barcode-lgpla = ls_migo-lgpla.
+*      ls_barcode-wepos = abap_true.
+*      ls_barcode-status = 'S'.
+*      ls_barcode-grdat = sy-datum.
+*      ls_barcode-mblnr_r = is_doc-mat_doc.
+*      ls_barcode-mjahr_r = is_doc-doc_year.
+
+*------------add by yakir at 30.10.2020 15:00:08------begin--*
+*      SELECT SINGLE insmk
+*        FROM matdoc
+*        INTO ls_barcode-stk_typ
+*        WHERE mblnr EQ is_doc-mat_doc
+*          AND mjahr EQ is_doc-doc_year.
+*------------add by yakir at 30.10.2020 15:00:08------end--*
+
+      MODIFY zewmbarcode FROM ls_barcode.
+    ENDIF.
+
+  ENDLOOP.
+
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

@@ -1,0 +1,318 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD ewm_hu_data.
+
+    DATA lt_data TYPE /scwm/tt_huident.
+    DATA lv_lgnum TYPE /scwm/lgnum.
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    DATA gt_msg LIKE TABLE OF gs_msg.
+    DATA:lt_huhdr TYPE  /scwm/tt_huhdr_int,
+         lt_huitm TYPE  /scwm/tt_huitm_int.
+    DATA lt_dad TYPE TABLE OF zewms_hu.
+    DATA lt_son TYPE TABLE OF zewms_hu.
+    DATA ls_put TYPE  zewms_hu.
+
+
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+    REPLACE ALL OCCURRENCES OF '"HU":'  IN lv_cdata WITH space.
+    SHIFT lv_cdata LEFT DELETING LEADING '{'.
+    SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_data ).
+
+
+    IF lt_data IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_data ASSIGNING FIELD-SYMBOL(<fs_data>).
+      <fs_data>-huident = |{ <fs_data>-huident ALPHA = IN }|.
+      IF <fs_data>-lgnum IS NOT INITIAL.
+        lv_lgnum = <fs_data>-lgnum.
+      ENDIF.
+    ENDLOOP.
+
+    CALL FUNCTION '/SCWM/HU_READ_MULT'
+      EXPORTING
+        it_huident   = lt_data
+      IMPORTING
+        et_huhdr     = lt_huhdr
+        et_huitm     = lt_huitm
+      EXCEPTIONS
+        wrong_input  = 1
+        not_possible = 2
+        OTHERS       = 3.
+
+    IF sy-subrc NE 0.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '查询无数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ELSE.
+      DELETE lt_huhdr WHERE empty EQ abap_true.
+      DELETE lt_huitm WHERE vsi NE space .""删除虚拟库存项目和空箱
+
+*      ""hu stock refresh
+*      DATA lr_hu TYPE  rseloption.
+*      DATA:et_huitm TYPE  /scwm/tt_stock_select.
+*
+*      lr_hu = VALUE #( FOR lrs_hu IN lt_data
+*      ( sign = 'I'
+*        option = 'EQ'
+*        low = lrs_hu-huident ) ).
+*
+*      CALL FUNCTION '/SCWM/SELECT_STOCK'
+*        EXPORTING
+*          iv_lgnum   = lt_data[ 1 ]-lgnum
+*          ir_huident = lr_hu
+*        IMPORTING
+*          et_huitm   = et_huitm
+*        EXCEPTIONS
+*          error      = 1
+*          OTHERS     = 2.
+
+
+      ""processing data
+      LOOP AT lt_data INTO DATA(ls_data).
+        READ TABLE lt_huhdr
+        INTO DATA(ls_huhdr)
+        WITH KEY huident = ls_data-huident
+                 lgnum = ls_data-lgnum.
+
+        IF sy-subrc NE 0.
+          CONTINUE.
+        ENDIF.
+
+        CLEAR ls_put.
+        ls_put-hupal = |{ ls_huhdr-huident ALPHA = OUT }|.
+        ls_put-zzdjdat = ls_huhdr-zzdjdat. ""ADD BY VICKY 07.06.2021 09:01:44
+        CALL FUNCTION 'CONVERSION_EXIT_MDLPD_OUTPUT'
+          EXPORTING
+            input  = ls_huhdr-pmat_guid
+          IMPORTING
+            output = ls_put-paltyp.
+
+        ls_put-box_qty = REDUCE #( INIT i TYPE i
+        FOR wa IN lt_huhdr WHERE ( higher_guid = ls_huhdr-guid_hu )
+        NEXT i = i + 1 ).
+
+        LOOP AT lt_huhdr
+          INTO DATA(ls_sum)
+          WHERE higher_guid = ls_huhdr-guid_hu.
+*            AND empty NE abap_true.
+          DATA(lv_qty) = REDUCE #( INIT x TYPE /scwm/de_quantity
+                  FOR wa_itm IN lt_huitm   WHERE ( guid_parent = ls_sum-guid_hu )
+                  NEXT x = x + wa_itm-quana ).
+          ADD lv_qty TO ls_put-total_qty.
+        ENDLOOP.
+
+
+
+        IF ls_put-total_qty NE 0.""如果本身可以展开下一层，则正常处理
+          ls_put-meins = lt_huitm[ guid_parent = ls_sum-guid_hu ]-altme.
+          CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+            EXPORTING
+              input          = ls_put-meins
+            IMPORTING
+              output         = ls_put-mseh3
+            EXCEPTIONS
+              unit_not_found = 1
+              OTHERS         = 2.
+
+*------------add by yakir at 24.11.2020 13:41:46------begin--*
+          SELECT SINGLE mseht
+            FROM t006a
+            INTO ls_put-mseht
+            WHERE msehi EQ ls_put-meins
+              AND spras EQ sy-langu.
+*------------add by yakir at 24.11.2020 13:41:46------end--*
+
+          DATA(lv_matid) = lt_huitm[ guid_parent = ls_sum-guid_hu ]-matid.
+          SELECT SINGLE a~matnr,b~maktx
+            FROM mara AS a
+            JOIN makt AS b ON a~matnr EQ b~matnr
+            AND b~spras EQ @sy-langu
+            INTO CORRESPONDING FIELDS OF @ls_put
+            WHERE scm_matid_guid16 EQ @lv_matid.
+
+
+        ELSE.""如果本身就是BOX，需要特殊处理数据
+
+          IF line_exists( lt_huitm[ guid_parent = ls_huhdr-guid_hu ] ).
+            ls_put-cwquan =   lt_huitm[ guid_parent = ls_huhdr-guid_hu ]-cwquan.
+            ls_put-cwunit =   lt_huitm[ guid_parent = ls_huhdr-guid_hu ]-cwunit.
+            ls_put-vfdat =   lt_huitm[ guid_parent = ls_huhdr-guid_hu ]-vfdat.""ADD BY VICKY 17.03.2021 08:40:09
+
+
+            ls_put-meins = lt_huitm[ guid_parent = ls_huhdr-guid_hu ]-altme.
+            CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+              EXPORTING
+                input          = ls_put-meins
+              IMPORTING
+                output         = ls_put-mseh3
+              EXCEPTIONS
+                unit_not_found = 1
+                OTHERS         = 2.
+
+*------------add by yakir at 24.11.2020 13:41:46------begin--*
+            SELECT SINGLE mseht
+              FROM t006a
+              INTO ls_put-mseht
+              WHERE msehi EQ ls_put-meins
+                AND spras EQ sy-langu.
+*------------add by yakir at 24.11.2020 13:41:46------end--*
+
+            lv_matid = lt_huitm[ guid_parent = ls_huhdr-guid_hu ]-matid.
+            SELECT SINGLE a~matnr,b~maktx
+              FROM mara AS a
+              JOIN makt AS b ON a~matnr EQ b~matnr
+              AND b~spras EQ @sy-langu
+              INTO CORRESPONDING FIELDS OF @ls_put
+              WHERE scm_matid_guid16 EQ @lv_matid.
+
+            ls_put-box_qty = 1.
+            ls_put-mat_qty = ls_put-total_qty = lt_huitm[ guid_parent = ls_huhdr-guid_hu ]-quana.
+
+            DATA(lv_batchid) = lt_huitm[ guid_parent = ls_huhdr-guid_hu ]-batchid.
+            SELECT SINGLE a~charg,a~hsdat
+              FROM mch1 AS a
+              INTO CORRESPONDING FIELDS OF @ls_put
+              WHERE batch_id EQ @lv_batchid
+                AND matnr EQ @ls_put-matnr.
+            ls_put-hsdatj = ls_put-hsdat.
+
+
+          ENDIF.
+
+        ENDIF.
+        ls_put-lgpla = ls_huhdr-lgpla.
+        APPEND ls_put TO lt_dad.
+
+
+
+*-----------son---------有展开的情况------------*
+        CHECK line_exists( lt_huhdr[ higher_guid = ls_huhdr-guid_hu ] ).
+
+        LOOP AT lt_huhdr INTO DATA(ls_son)
+          WHERE higher_guid = ls_huhdr-guid_hu.
+
+          CLEAR ls_put.
+          ls_put-hupal = |{ ls_huhdr-huident ALPHA = OUT }|.
+          ls_put-hupal = ls_huhdr-zzdjdat . ""ADD BY VICKY 07.06.2021 09:02:35
+          CALL FUNCTION 'CONVERSION_EXIT_MDLPD_OUTPUT'
+            EXPORTING
+              input  = ls_huhdr-pmat_guid
+            IMPORTING
+              output = ls_put-paltyp.
+
+          ls_put-hubox = |{ ls_son-huident ALPHA = OUT }|.
+          CALL FUNCTION 'CONVERSION_EXIT_MDLPD_OUTPUT'
+            EXPORTING
+              input  = ls_son-pmat_guid
+            IMPORTING
+              output = ls_put-boxtyp.
+
+          READ TABLE lt_huitm TRANSPORTING NO FIELDS WITH KEY guid_parent = ls_son-guid_hu.   "Jeff 20240702,解决ITAB_LINE_NOT_FOUND dump
+          IF sy-subrc = 0.
+            ls_put-cwquan =   lt_huitm[ guid_parent = ls_son-guid_hu ]-cwquan.
+            ls_put-cwunit =   lt_huitm[ guid_parent = ls_son-guid_hu ]-cwunit.
+            ls_put-vfdat =   lt_huitm[ guid_parent = ls_son-guid_hu ]-vfdat.""ADD BY VICKY 17.03.2021 08:40:35
+            ls_put-meins = lt_huitm[ guid_parent = ls_son-guid_hu ]-altme.
+            CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+              EXPORTING
+                input          = ls_put-meins
+              IMPORTING
+                output         = ls_put-mseh3
+              EXCEPTIONS
+                unit_not_found = 1
+                OTHERS         = 2.
+
+*------------add by yakir at 24.11.2020 13:41:46------begin--*
+            SELECT SINGLE mseht
+              FROM t006a
+              INTO ls_put-mseht
+              WHERE msehi EQ ls_put-meins
+                AND spras EQ sy-langu.
+*------------add by yakir at 24.11.2020 13:41:46------end--*
+
+            lv_matid = lt_huitm[ guid_parent = ls_son-guid_hu ]-matid.
+            SELECT SINGLE a~matnr,b~maktx
+              FROM mara AS a
+              JOIN makt AS b ON a~matnr EQ b~matnr
+              AND b~spras EQ @sy-langu
+              INTO CORRESPONDING FIELDS OF @ls_put
+              WHERE scm_matid_guid16 EQ @lv_matid.
+
+            lv_batchid = lt_huitm[ guid_parent = ls_son-guid_hu ]-batchid.
+            SELECT SINGLE a~charg,a~hsdat
+              FROM mch1 AS a
+              INTO CORRESPONDING FIELDS OF @ls_put
+              WHERE batch_id EQ @lv_batchid
+                AND matnr EQ @ls_put-matnr.
+
+            ls_put-mat_qty =   lt_huitm[ guid_parent = ls_son-guid_hu ]-quana.
+            ls_put-hsdatj = ls_put-hsdat.
+            ls_put-lgpla = ls_huhdr-lgpla.
+            APPEND ls_put TO lt_son.
+          ENDIF.
+
+          CLEAR:ls_son.
+        ENDLOOP.
+
+
+      ENDLOOP.
+
+      IF lt_dad[] IS NOT INITIAL.
+        CALL FUNCTION 'ZFM_HU_DATA'
+          EXPORTING
+            iv_lgnum  = lv_lgnum
+          TABLES
+            ct_hudata = lt_dad[].
+      ENDIF.
+
+      IF lt_son[] IS NOT INITIAL.
+        CALL FUNCTION 'ZFM_HU_DATA'
+          EXPORTING
+            iv_lgnum  = lv_lgnum
+          TABLES
+            ct_hudata = lt_son[].
+      ENDIF.
+
+
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '数据读取成功！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      SHIFT ev_json RIGHT DELETING TRAILING '}'.
+      IF lt_dad IS NOT INITIAL.
+        DATA(lv_dad) = /ui2/cl_json=>serialize( lt_dad ).
+        ev_json = ev_json && ',"DAD":' && lv_dad .
+      ENDIF.
+
+      IF lt_son IS NOT INITIAL.
+        DATA(lv_son) = /ui2/cl_json=>serialize( lt_son ).
+        ev_json = ev_json && ',"SON":' && lv_son .
+      ENDIF.
+
+
+      ev_json = ev_json  && '}'.
+    ENDIF.
+
+
+
+
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

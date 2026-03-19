@@ -1,0 +1,51 @@
+FUNCTION zfm_ewm_oth_inbound_cal.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(IT_IN) TYPE  ZEWMT_GOODSMVT_CREATE OPTIONAL
+*"     VALUE(IS_IN) TYPE  ZEWMS_GOODSMVT_CREATE OPTIONAL
+*"     VALUE(IV_CHARG) TYPE  CHAR1 OPTIONAL
+*"  CHANGING
+*"     VALUE(ES_GITEM) TYPE  BAPI2017_GM_ITEM_CREATE OPTIONAL
+*"----------------------------------------------------------------------
+
+  SELECT SINGLE meinh
+  FROM marm
+  INTO es_gitem-entry_uom
+  WHERE matnr EQ is_in-matnr
+  AND ty2tq EQ zbakcl_pda=>cn_b.
+  IF sy-subrc = 0 AND es_gitem-entry_uom <> space.
+    IF iv_charg = 'X'.
+      es_gitem-entry_qnt = REDUCE #( INIT x TYPE menge_d
+      FOR wa IN it_in
+      WHERE ( charg EQ is_in-charg )
+      NEXT x = x + 1 ).
+    ELSE.
+      es_gitem-entry_qnt = REDUCE #( INIT x TYPE menge_d
+      FOR wa IN it_in
+      WHERE ( hsdat EQ is_in-hsdat )
+      NEXT x = x + 1 ).
+    ENDIF.
+  ELSE.
+    IF iv_charg = 'X'.
+      es_gitem-entry_qnt  = REDUCE #( INIT x TYPE menge_d
+      FOR wa IN it_in
+      WHERE ( charg EQ is_in-charg )
+      NEXT x = x + wa-menge ).
+      es_gitem-entry_uom  = is_in-meins."单位
+    ELSE.
+      es_gitem-entry_qnt  = REDUCE #( INIT x TYPE menge_d
+      FOR wa IN it_in
+      WHERE ( hsdat EQ is_in-hsdat )
+      NEXT x = x + wa-menge ).
+      es_gitem-entry_uom  = is_in-meins."单位
+    ENDIF.
+
+  ENDIF.
+
+
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

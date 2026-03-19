@@ -1,0 +1,103 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD get_physical_stock.
+
+    DATA: lo_mon_stock  TYPE REF TO /scwm/cl_mon_stock,
+          lt_huident_r  TYPE /scwm/tt_huident_r,
+          ls_huident_r  TYPE /scwm/s_huident_r,
+          lt_stock_mon  TYPE /scwm/tt_stock_mon,
+          ev_returncode TYPE xfeld.
+
+
+    TYPES:BEGIN OF ty_in,
+            huident TYPE /scwm/de_huident,
+            lgnum   TYPE /scwm/lgnum,
+          END OF ty_in.
+
+    DATA ls_in TYPE ty_in.
+
+    TYPES: BEGIN OF ty_out,
+             huident  TYPE /scwm/de_huident,
+             matnr    TYPE matnr,
+             maktx    TYPE maktx,
+             charg    TYPE /scwm/de_charg,
+             cat      TYPE /scwm/de_cat,
+             cat_text TYPE /scwm/de_ui_cat_text,
+             quan     TYPE /scwm/de_ui_quan,
+             meins    TYPE /scwm/de_base_uom,
+           END OF ty_out.
+
+    DATA: lt_out TYPE TABLE OF ty_out.
+
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+
+    /ui2/cl_json=>deserialize(
+       EXPORTING json = lv_cdata CHANGING data = ls_in ).
+
+
+    IF ls_in-huident IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    IF ls_in-lgnum IS INITIAL.
+      ls_in-lgnum = '1100'.
+    ENDIF.
+
+    CALL FUNCTION 'CONVERSION_EXIT_HUID_INPUT'
+      EXPORTING
+        input  = ls_in-huident
+      IMPORTING
+        output = ls_in-huident.
+
+
+    CREATE OBJECT lo_mon_stock
+      EXPORTING
+        iv_lgnum = ls_in-lgnum.
+
+
+    ls_huident_r-low = ls_in-huident.
+    ls_huident_r-sign = 'I'.
+    ls_huident_r-option = 'EQ'.
+    APPEND ls_huident_r TO lt_huident_r.
+    CLEAR: ls_huident_r.
+
+    CALL METHOD lo_mon_stock->get_physical_stock
+      EXPORTING
+        iv_drill_down = abap_false
+        it_huident_r  = lt_huident_r
+      IMPORTING
+        et_stock_mon  = lt_stock_mon
+        ev_error      = ev_returncode.
+
+
+
+    MOVE-CORRESPONDING lt_stock_mon TO lt_out.
+
+    LOOP AT lt_out ASSIGNING FIELD-SYMBOL(<fs_out>).
+
+      CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+        EXPORTING
+          input          = <fs_out>-meins
+        IMPORTING
+          output         = <fs_out>-meins
+        EXCEPTIONS
+          unit_not_found = 1
+          OTHERS         = 2.
+
+    ENDLOOP.
+
+
+    ev_json = /ui2/cl_json=>serialize(
+          data             = lt_out
+          pretty_name      = /ui2/cl_json=>pretty_mode-low_case
+      ).
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

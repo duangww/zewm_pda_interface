@@ -1,0 +1,190 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD move_hu.
+
+
+    DATA:BEGIN OF ls_data,
+           lgnum  TYPE /scwm/lgnum,
+           uname  TYPE sy-uname,
+           rsrc   TYPE /scwm/de_rsrc,
+           vlenr  TYPE /scwm/ordim_o-vlenr,
+           nlenr  TYPE /scwm/ordim_o-nlenr,
+           vlpla  TYPE /scwm/ordim_o-vlpla, "SOURCE BIN
+           nlpla  TYPE /scwm/ordim_o-nlpla, "TARGET BIN
+           procty TYPE /scwm/de_procty,
+           type   TYPE char1, ""1.HU移位 2.BOX合盘/拆盘 3.box合盘且重包装
+         END OF ls_data.
+
+    DATA lt_data LIKE TABLE OF ls_data.
+    DATA V_lgtyp TYPE /SCWM/LAGP-LGTYP.
+    DATA lt_return TYPE bapirettab.
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    DATA lt_create_hu TYPE /scwm/tt_to_crea_hu.
+    DATA ls_create_hu TYPE LINE OF /scwm/tt_to_crea_hu.
+    DATA lt_hu TYPE TABLE OF zewms_hu.
+
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+    REPLACE ALL OCCURRENCES OF '"DATA":'  IN lv_cdata WITH space.
+    SHIFT lv_cdata LEFT DELETING LEADING '{'.
+    SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_data ).
+
+
+    IF lt_data IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+
+    LOOP AT lt_data INTO ls_data.
+      TRANSLATE ls_data-uname TO UPPER CASE.
+      TRANSLATE ls_data-rsrc TO UPPER CASE.
+      ls_data-vlenr = |{ ls_data-vlenr ALPHA = IN }|.
+      ls_data-nlenr = |{ ls_data-nlenr ALPHA = IN }|.
+
+
+
+      ""业务场景
+      ""1.box hu ——>  目标HU/仓位中  属于库内合盘/拆盘  如果为重包装，则需要创建HU
+      ""2.PALLET HU ——> 目标仓位   属于库内移位
+
+      ""无论是移位还是合盘，都直接调用移位方法进行移位，只有重包装时才需要额外创建HU并打包
+      CLEAR ls_create_hu.
+
+*      CASE ls_data-type.
+*        WHEN cn_1.
+*
+*        WHEN cn_2.
+*        WHEN cn_3.
+*      ENDCASE.
+
+
+      ""目标货架位数据
+      ls_create_hu-nlpla   = ls_data-nlpla.
+      SELECT SINGLE lgpla,lgtyp,lgber
+        INTO @DATA(ls_lagp)
+      FROM /scwm/lagp
+      WHERE lgnum = @ls_data-lgnum
+      AND   lgpla = @ls_data-nlpla.
+      IF sy-subrc EQ 0.
+        ls_create_hu-nltyp   = ls_lagp-lgtyp.
+        ls_create_hu-nlber   = ls_lagp-lgber.
+      ENDIF.
+
+      ls_create_hu-huident = ls_data-vlenr.""源HU
+      ls_create_hu-procty  = ls_data-procty.""仓库处理类型 默认Z301
+      IF ls_create_hu-procty  IS INITIAL.
+        ls_create_hu-procty = cn_z301.
+      ENDIF.
+      ls_create_hu-squit   = abap_true.""如有任务 自动确认
+
+      ls_create_hu-nlenr = ls_data-nlenr.""目标HU  “”只有箱  合盘 拆盘时使用
+
+      ls_create_hu-prsrc = ls_data-rsrc.""资源
+
+      APPEND ls_create_hu TO lt_create_hu.
+
+
+*----ADD by vicky AT 08.06.2021 16:41:20  begin-----------*
+
+      SELECT SINGLE lgtyp INTO V_lgtyp FROM /SCWM/LAGP WHERE lgnum = ls_data-lgnum
+        and LGPLA = ls_data-Vlpla .
+
+      AUTHORITY-CHECK OBJECT '/SCWM/TOCR'
+      FOR USER ls_data-uname
+      ID '/SCWM/LGNU' FIELD ls_data-lgnum
+      ID '/SCWM/LGTY' FIELD V_lgtyp .
+      IF sy-subrc <> 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '仓库编号' && ls_data-lgnum && '源存储类型' && ls_lagp-lgtyp && '无权限'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+      CLEAR V_lgtyp.
+
+
+      SELECT SINGLE lgtyp INTO V_lgtyp FROM /SCWM/LAGP WHERE lgnum = ls_data-lgnum
+        and LGPLA = ls_data-nlpla.
+      AUTHORITY-CHECK OBJECT '/SCWM/TOCR'
+      FOR USER ls_data-uname
+      ID '/SCWM/LGNU' FIELD ls_data-lgnum
+      ID '/SCWM/LGTY' FIELD V_lgtyp .
+      IF sy-subrc <> 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '仓库编号' && ls_data-lgnum && '目标存储类型' && ls_lagp-lgtyp && '无权限'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+      ENDIF.
+
+
+*----add by vicky at 08.06.2021 16:41:20 end-----------*
+
+    ENDLOOP.
+
+
+    CALL FUNCTION '/SCWM/TO_CREATE_MOVE_HU'
+      EXPORTING
+        iv_lgnum       = ls_data-lgnum
+        iv_bname       = ls_data-uname
+        it_create_hu   = lt_create_hu
+        iv_commit_work = space
+      IMPORTING
+        et_bapiret     = lt_return.
+
+    IF NOT line_exists( lt_return[ type = 'E' ] )
+      AND NOT line_exists( lt_return[ type = 'A' ] ).
+
+      COMMIT WORK AND WAIT.
+      CLEAR gs_msg.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '库内移位完成！'.
+
+
+      ""重包装？
+      IF ls_data-type EQ cn_3.
+        lt_hu = VALUE #(
+        FOR wa IN lt_data
+        ( hupal = wa-vlenr ) ).
+
+        CALL FUNCTION 'ZFM_EWM_REPACK'
+          EXPORTING
+            iv_lgnum = ls_data-lgnum
+            iv_nlpla = ls_data-nlpla
+          TABLES
+            it_hu    = lt_hu
+          CHANGING
+            gs_msg   = gs_msg.
+      ENDIF.
+
+    ELSE.
+
+      ROLLBACK WORK.
+
+      DATA(ls_return) = lt_return[ type = 'E' ].
+
+      MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+              INTO DATA(mtext)
+              WITH ls_return-message_v1 ls_return-message_v2 ls_return-message_v3 ls_return-message_v4.
+
+      CLEAR gs_msg.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '库内移位失败！原因：'
+      && mtext.
+    ENDIF.
+
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

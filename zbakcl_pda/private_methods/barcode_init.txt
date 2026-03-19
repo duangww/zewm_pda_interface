@@ -1,0 +1,304 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD barcode_init.
+
+    DATA ls_data TYPE zewms004.
+    DATA lt_data LIKE TABLE OF ls_data.
+    DATA ls_doc TYPE bapi2017_gm_head_ret.
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    TYPES:BEGIN OF ty_scm_status,
+            barcode   TYPE /scwm/de_huident,
+            status    TYPE char1,
+            orderid   TYPE mblnr,
+            projectid TYPE mjahr,
+          END OF ty_scm_status.
+
+
+    DATA lt_scm TYPE TABLE OF ty_scm_status.
+
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+    REPLACE ALL OCCURRENCES OF '"data":'  IN lv_cdata WITH space.
+    SHIFT lv_cdata LEFT DELETING LEADING '{'.
+    SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_data ).
+
+    IF lt_data IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    ""读取po数据
+    LOOP AT lt_data INTO ls_data.
+
+      SELECT SINGLE b~matnr,lifnr,maktx
+        FROM ekko AS a
+        JOIN ekpo AS b ON a~ebeln EQ b~ebeln
+        LEFT JOIN makt AS c ON b~matnr EQ c~matnr AND c~spras EQ @sy-langu
+        INTO CORRESPONDING FIELDS OF @ls_data
+        WHERE a~ebeln EQ @ls_data-ebeln
+          AND ebelp EQ @ls_data-ebelp.
+
+      SELECT SINGLE meinh
+        FROM marm
+        INTO ls_data-pg_unit
+        WHERE matnr EQ ls_data-matnr
+          AND ty2tq EQ cn_b.
+
+      TRANSLATE ls_data-lgort TO UPPER CASE.
+
+      ls_data-ebelp = |{ ls_data-ebelp ALPHA = IN }|.
+      ls_data-lgnum = to_upper( ls_data-lgnum ).
+      ls_data-hupal = |{ ls_data-hupal ALPHA = IN }|.
+      ls_data-hubox = |{ ls_data-hubox ALPHA = IN }|.
+
+      MODIFY lt_data FROM ls_data TRANSPORTING matnr lifnr pg_unit lgort
+      ebelp lgnum hupal hubox maktx.
+
+    ENDLOOP.
+
+
+
+    DATA:BEGIN OF ls_charg,
+           posnr TYPE posnr,
+           charg TYPE charg_d,
+           lgort TYPE lgort_d,
+         END OF ls_charg.
+
+    DATA ls_header TYPE bbp_inbd_l.
+    DATA lt_item TYPE TABLE OF bbp_inbd_d .
+    DATA ls_item TYPE bbp_inbd_d.
+    DATA lt_return TYPE TABLE OF bapireturn.
+    DATA lv_vbeln TYPE likp-vbeln.
+    DATA ls_attr TYPE bapibatchatt.
+    DATA lt_ret TYPE TABLE OF bapiret2.
+    DATA lv_charg TYPE bapibatchkey-batch.
+    DATA lt_charg LIKE TABLE OF ls_charg.
+
+    DATA: lv_key        TYPE bapi1003_key-object,
+          lv_key_long   TYPE bapi1003_key-object_long,
+          lv_table      TYPE bapi1003_key-objecttable,
+          lv_class      TYPE bapi1003_key-classnum,
+          lv_class_type TYPE bapi1003_key-classtype,
+          lv_status     TYPE bapi1003_key-status,
+          lt_ret_batch  TYPE TABLE OF bapiret2,
+          lt_alloc_num  TYPE TABLE OF bapi1003_alloc_values_num,
+          lt_alloc_char TYPE TABLE OF bapi1003_alloc_values_char,
+          ls_alloc_char TYPE bapi1003_alloc_values_char,
+          lt_alloc_curr TYPE TABLE OF bapi1003_alloc_values_curr,
+          ls_bf         TYPE bapibatchctrl.
+
+    ls_header-deliv_date = sy-datum.
+
+    DATA(lv_item) = 10.
+
+*****    LOOP AT lt_data INTO DATA(ls_head)
+*****      GROUP BY ( ebeln = ls_head-ebeln
+*****                 ebelp = ls_head-ebelp
+*****                 licha = ls_head-licha ) ASCENDING.
+*****
+*****      ""ADD BY VICKY 20191121 创建批次特性前检查是否启用批次特性
+*****      SELECT SINGLE matnr,xchpf
+*****        FROM mara
+*****        INTO @DATA(ls_xchpf)
+*****        WHERE matnr = @ls_head-matnr.
+*****      IF sy-subrc = 0 AND ls_xchpf-xchpf = 'X'.
+*****
+*****        ""根据新的厂商批次建立新批次
+*****        CLEAR ls_attr.
+*****        CLEAR lv_charg.
+*****        CLEAR ls_bf.
+*****        REFRESH lt_ret.
+*****        ls_attr-prod_date = ls_head-hsdat.
+*****        ls_bf-doclassify = abap_true.
+*****        CALL FUNCTION 'BAPI_BATCH_CREATE'
+*****          EXPORTING
+*****            batchattributes    = ls_attr
+*****            material_long      = ls_head-matnr
+*****            batchcontrolfields = ls_bf
+*****          IMPORTING
+*****            batch              = lv_charg
+*****          TABLES
+*****            return             = lt_ret.
+*****
+*****
+*****        IF NOT line_exists( lt_ret[ type = 'E' ] ) AND
+*****        NOT line_exists( lt_ret[ type = 'A' ] ).
+*****          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+*****            EXPORTING
+*****              wait = abap_true.
+*****
+*****
+*****          DO  .""需要等待TABLE 写入
+*****
+*****            IF sy-index EQ 20.
+*****              gs_msg-msg_type = 'E'.
+*****              gs_msg-msg_content = '批次创建失败！未知原因。'.
+*****              ev_json = /ui2/cl_json=>serialize( gs_msg ).
+*****              RETURN.
+*****            ENDIF.
+*****
+*****            SELECT COUNT(*)
+*****            FROM mch1
+*****            WHERE matnr EQ ls_head-matnr
+*****            AND charg EQ lv_charg.
+*****
+*****            IF sy-subrc NE 0 AND sy-index < 25.
+*****              WAIT UP TO 1 SECONDS.
+*****            ELSE.
+*****              EXIT.
+*****            ENDIF.
+*****
+*****          ENDDO.
+*****
+*****          ""写入批次特性
+*****          lv_class_type = '023'.
+*****          lv_key+0(18) = ls_head-matnr.
+*****          lv_key+18(10) = lv_charg.
+*****          lv_table = 'MCH1'.
+*****          lv_class = 'YB_EXP_DATE_002'.
+*****
+*****          REFRESH lt_alloc_char.
+*****
+*****          CLEAR ls_alloc_char.
+*****          ls_alloc_char-charact = 'Z_VENDORBATCH'.
+*****          ls_alloc_char-value_char = ls_head-licha.
+*****          ls_alloc_char-value_neutral = ls_head-licha.
+*****          APPEND ls_alloc_char TO lt_alloc_char.
+*****
+*****          CLEAR ls_alloc_char.
+*****          ls_alloc_char-charact = 'Z_PONO1'.
+*****          ls_alloc_char-value_char = ls_head-ebeln.
+*****          ls_alloc_char-value_neutral = ls_head-ebeln.
+*****          APPEND ls_alloc_char TO lt_alloc_char.
+*****
+*****          REFRESH lt_ret_batch.
+*****
+*****          CALL FUNCTION 'BAPI_OBJCL_CHANGE'
+*****            EXPORTING
+*****              objectkey          = lv_key
+*****              objecttable        = lv_table
+*****              classnum           = lv_class
+*****              classtype          = lv_class_type
+*****              status             = '1'
+*****              keydate            = sy-datum
+*****              objectkey_long     = lv_key_long
+*****            IMPORTING
+*****              classif_status     = lv_status
+*****            TABLES
+*****              allocvaluesnumnew  = lt_alloc_num
+*****              allocvaluescharnew = lt_alloc_char
+*****              allocvaluescurrnew = lt_alloc_curr
+*****              return             = lt_ret_batch.
+*****
+*****          IF NOT line_exists( lt_ret_batch[ type = 'E' ] ) AND
+*****          NOT line_exists( lt_ret_batch[ type = 'A' ] ).
+*****            CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+*****              EXPORTING
+*****                wait = abap_true.
+*****          ELSE.
+*****            CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+*****            gs_msg-msg_type = 'E'.
+*****            gs_msg-msg_content = '批次特性写入失败！请检查批次是否异常。'.
+*****            ev_json = /ui2/cl_json=>serialize( gs_msg ).
+*****            RETURN.
+*****          ENDIF.
+*****
+*****        ELSE.
+*****          CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+*****          gs_msg-msg_type = 'E'.
+*****          gs_msg-msg_content = '批次创建失败！请检查流水码问题。'.
+*****          ev_json = /ui2/cl_json=>serialize( gs_msg ).
+*****          RETURN.
+*****        ENDIF.
+*****
+*****
+*****      ENDIF.
+*****
+*****
+*****    ENDLOOP.
+
+
+    ls_doc-mat_doc = '9999999999'.
+    ls_doc-doc_year = '9999'.
+
+
+    SET UPDATE TASK LOCAL.
+
+    CALL FUNCTION 'ZFM_UPDATE_PO_HU' IN UPDATE TASK
+      EXPORTING
+        is_doc  = ls_doc
+      TABLES
+        it_data = lt_data.
+
+    COMMIT WORK.
+
+
+    ""提交数据到SCM
+
+
+    lt_scm = VALUE #( FOR wa IN lt_data
+    ( barcode = |{ wa-hubox ALPHA = OUT }|
+      status = '2'
+      orderid = ls_doc-mat_doc
+      projectid = ls_doc-doc_year )
+    ).
+
+    lt_scm = VALUE #( BASE lt_scm FOR wa IN lt_data
+    WHERE ( hupal IS NOT INITIAL )
+    ( barcode = |{ wa-hupal ALPHA = OUT }|
+      status = '2'
+      orderid = ls_doc-mat_doc
+      projectid = ls_doc-doc_year )
+    ).
+
+    SORT lt_scm BY barcode.
+    DELETE ADJACENT DUPLICATES FROM lt_scm COMPARING barcode.
+
+    DATA ls_log TYPE ztpda_jk_log.
+
+    IF lt_scm IS NOT  INITIAL.
+      DATA(lv_json) = /ui2/cl_json=>serialize( lt_scm ).
+      lv_json = '{ "UPDATELIST":' && lv_json && '}'.
+*      CALL FUNCTION 'ZFM_SCM_DATA_SAVE' STARTING NEW TASK 'ZSCM_T1'
+
+      ls_log-request_id = gv_request_id.
+      ls_log-request_data = lv_json.
+      ls_log-action = 'ZFM_SCM_DATA_SAVE'.
+      ls_log-create_user = sy-uname.
+      ls_log-create_date = sy-datum.
+      ls_log-create_time = sy-uzeit.
+
+      MODIFY ztpda_jk_log FROM ls_log.
+      COMMIT WORK.
+
+
+      CALL FUNCTION 'ZFM_SCM_DATA_SAVE' IN BACKGROUND TASK
+        EXPORTING
+          iv_json       = lv_json
+          iv_request_id = gv_request_id.
+
+      COMMIT WORK.
+    ENDIF.
+
+
+
+    gs_msg-msg_type = 'S'.
+    gs_msg-msg_content = '条码初始化完成!'.
+    ev_json = /ui2/cl_json=>serialize( gs_msg ).
+
+
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

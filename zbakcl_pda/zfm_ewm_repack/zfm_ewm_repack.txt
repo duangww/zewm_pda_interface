@@ -1,0 +1,150 @@
+FUNCTION zfm_ewm_repack.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(IV_LGNUM) TYPE  /SCWM/LGNUM
+*"     VALUE(IV_NLPLA) TYPE  /SCWM/LTAP_NLPLA
+*"  TABLES
+*"      IT_HU STRUCTURE  ZEWMS_HU
+*"  CHANGING
+*"     VALUE(GS_MSG) TYPE  ZBAKS_MSG_PDA
+*"----------------------------------------------------------------------
+
+
+  DATA(lo_pack) = NEW /scwm/cl_wm_packing( ).
+  DATA ls_mat TYPE /scwm/s_pack_stock.
+  DATA lv_pmat TYPE /scmb/mdl_matid_ce.
+  DATA ls_work TYPE /scwm/tworkst.
+  DATA lr_hu TYPE rseloption.
+*  iv_hu = |{ iv_hu ALPHA = IN }|.
+
+*  CALL FUNCTION '/SCWM/TWORKST_READ_SINGLE'
+*    EXPORTING
+*      iv_lgnum       = iv_lgnum
+*      iv_workstation = 'STAG'
+*    IMPORTING
+*      es_workst      = ls_work
+*    EXCEPTIONS
+*      error          = 1
+*      not_found      = 2
+*      OTHERS         = 3.
+*  ls_work-lgnum = iv_lgnum.
+*  ls_work-workstation = 'STAG'.
+*  ls_work-lgpla = iv_nlpla.
+
+  "根据仓库初始化 操作
+  CALL METHOD lo_pack->init(
+    EXPORTING
+      iv_lgnum = iv_lgnum ).
+
+  CALL FUNCTION '/SCWM/TO_INIT_NEW'
+    EXPORTING
+      iv_lgnum = iv_lgnum.
+
+*  lr_hu = VALUE #(
+*  FOR lrs_hu IN it_hu
+*  ( sign = 'I'
+*    option = 'EQ'
+*    low = lrs_hu-hupal ) ).
+
+*  CALL METHOD lo_pack->init_by_workstation(
+*    EXPORTING
+*      is_workstation = ls_work
+**     ir_huident     = lr_hu
+*    EXCEPTIONS
+*      error          = 1
+*      OTHERS         = 2 ).
+
+*  CHECK sy-subrc EQ 0.
+
+
+  CALL FUNCTION 'CONVERSION_EXIT_MDLPD_INPUT'
+    EXPORTING
+      input  = 'PALLET'
+    IMPORTING
+      output = lv_pmat.
+
+  ""建立托盘hu  内部给号
+
+  CALL METHOD lo_pack->/scwm/if_pack_bas~create_hu(
+    EXPORTING
+      iv_pmat    = lv_pmat
+      i_location = iv_nlpla
+    RECEIVING
+      es_huhdr   = DATA(ls_hudata)
+    EXCEPTIONS
+      error      = 1
+      OTHERS     = 2 ).
+
+
+  IF sy-subrc EQ 0.
+    CALL METHOD lo_pack->/scwm/if_pack_bas~save(
+      EXCEPTIONS
+        error  = 1
+        OTHERS = 2 ).
+
+
+    LOOP AT it_hu ASSIGNING FIELD-SYMBOL(<fs_hu>).
+      <fs_hu>-hupal = |{ <fs_hu>-hupal ALPHA = IN }|.
+      ""源HU的ID查出来
+      SELECT SINGLE guid_hu
+        FROM /scwm/huhdr
+        INTO @DATA(lv_guid)
+        WHERE huident EQ @<fs_hu>-hupal.
+
+      CALL FUNCTION '/SCWM/TO_INIT_NEW'
+        EXPORTING
+          iv_lgnum = iv_lgnum.
+
+
+      CALL METHOD lo_pack->/scwm/if_pack_bas~pack_hu(
+        EXPORTING
+          iv_source_hu = lv_guid
+          iv_dest_hu   = ls_hudata-guid_hu
+        EXCEPTIONS
+          error        = 1
+          OTHERS       = 2 ).
+
+
+      IF sy-subrc NE 0.
+
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                INTO DATA(mtext)
+                WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = gs_msg-msg_content && '——执行打包时出现错误，HU绑定关系失败，消息如下：'
+        && mtext.
+        RETURN.
+      ELSE.
+        CALL METHOD lo_pack->/scwm/if_pack_bas~save(
+          EXCEPTIONS
+            error  = 1
+            OTHERS = 2 ).
+      ENDIF.
+
+      CLEAR lv_guid.
+
+    ENDLOOP.
+
+  ELSE.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            INTO mtext
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    gs_msg-msg_type = 'E'.
+    gs_msg-msg_content = gs_msg-msg_content && '——执行打包时出现错误，创建HU失败，消息如下：'
+    && mtext.
+    RETURN.
+  ENDIF.
+
+
+
+*  lo_pack->/scwm/if_pack_bas~cleanup( ).
+
+  gs_msg-msg_type = 'S'.
+  gs_msg-msg_content = gs_msg-msg_content && '——执行重包装完成!父级HU为：'
+  && |{ ls_hudata-huident ALPHA = OUT }|.
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

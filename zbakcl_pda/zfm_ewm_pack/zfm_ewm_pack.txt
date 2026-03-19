@@ -1,0 +1,442 @@
+FUNCTION zfm_ewm_pack.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(IV_DN) TYPE  VBELN_VL
+*"     VALUE(IV_LGNUM) TYPE  /SCWM/LGNUM
+*"  TABLES
+*"      IT_DATA STRUCTURE  ZEWMS004
+*"  CHANGING
+*"     VALUE(GS_MSG) TYPE  ZBAKS_MSG_PDA
+*"----------------------------------------------------------------------
+
+
+  DATA lt_doc TYPE /scwm/tt_docid.
+  DATA(lo_pack) = NEW /scwm/cl_dlv_pack_ibdl( ).
+  DATA ls_quan TYPE /scwm/s_quan.
+  DATA ls_pg TYPE /scwm/s_quan.
+  DATA ls_mat TYPE /scwm/s_pack_stock.
+  DATA lv_pmat TYPE /scmb/mdl_matid_ce.
+  DATA lt_cancel TYPE TABLE OF bapiret2.
+  DATA: ls_hudata TYPE /scwm/s_huhdr_int.
+
+  TYPES BEGIN OF ty_hu.
+  TYPES hu TYPE /scwm/huident.
+  TYPES hu_dad TYPE /scwm/huident.
+  TYPES hu_type TYPE ze_huty.
+  TYPES END OF ty_hu.
+
+  TYPES BEGIN OF ty_guid.
+  TYPES:hu   TYPE /scwm/huident,
+        guid TYPE /scwm/guid_hu.
+  TYPES END OF ty_guid.
+
+  DATA ls_guid TYPE ty_guid.
+  DATA lt_guid TYPE TABLE OF ty_guid.
+
+  DATA lt_hu TYPE TABLE OF ty_hu.
+  DATA lt_scm TYPE TABLE OF zewms_scm.
+
+  DATA lv_109 TYPE mblnr.
+  IMPORT lv_109 = lv_109 FROM MEMORY ID 'Z109'.
+
+
+  iv_dn = |{ iv_dn ALPHA = IN }|.
+*  BREAK sapyh.
+
+  ""读取EWM 交货单的 ID
+  DO  .""需要等待TABLE 写入
+
+    SELECT a~docid,a~itemid,a~refitemno,a~refdocno
+      FROM /scdl/db_refdoc AS a
+*    JOIN lips AS b ON a~refdocno EQ b~vbeln
+*                  AND a~refitemno EQ b~posnr
+      INTO TABLE @DATA(lt_docid)
+      WHERE refdoccat EQ 'ERP'
+        AND refitemno NE 0
+        AND refdocno EQ @iv_dn.
+
+    IF sy-subrc NE 0 AND sy-index < 25.
+      WAIT UP TO 1 SECONDS.
+    ELSE.
+      EXIT.
+    ENDIF.
+
+  ENDDO.
+
+
+  MOVE-CORRESPONDING lt_docid TO lt_doc.
+  DELETE ADJACENT DUPLICATES FROM lt_doc COMPARING docid.
+
+
+
+  ""根据DN初始化 操作
+  CALL METHOD lo_pack->init
+    EXPORTING
+      iv_lgnum      = iv_lgnum
+      it_docid      = lt_doc
+      iv_doccat     = 'PDI'
+      iv_no_refresh = abap_true
+      iv_lock_dlv   = abap_true.
+
+
+  ""父级hu列表
+  DATA(lt_dad) = it_data[].
+  SORT lt_dad BY hupal.
+  DELETE ADJACENT DUPLICATES FROM lt_dad
+  COMPARING hupal.
+  lt_hu = VALUE #( FOR wa IN lt_dad WHERE ( hupal IS NOT INITIAL )
+  ( hu = |{ wa-hupal ALPHA = IN }|
+    hu_type = wa-paltyp ) ).
+
+*------------add by yakir at 26.11.2019 15:27:52------begin--*
+  ""更新SCM的 memory
+  lt_scm = VALUE #( FOR wa IN lt_dad WHERE ( hupal IS NOT INITIAL )
+  ( barcode = |{ wa-hupal ALPHA = OUT }|
+    status = '2'
+    orderid = |{ iv_dn ALPHA = OUT }|
+    projectid = wa-dn_item ) ).
+
+*----ADD by vicky AT 06.11.2020 14:55:16  begin-----------*
+  ""原来只有父hu不为空时会输出父hu（pal）,现在加上没有父hu的，直接输出box
+  lt_scm = VALUE #( BASE lt_scm FOR wa IN it_data
+  WHERE ( hupal IS INITIAL AND hubox IS NOT INITIAL )
+  (  barcode = |{ wa-hubox ALPHA = OUT }|
+  status = '2'
+  orderid = |{ iv_dn ALPHA = OUT }|
+  projectid = wa-dn_item
+  )  ).
+*----add by vicky at 06.11.2020 14:55:16 end-----------*
+
+  EXPORT lt_scm = lt_scm TO MEMORY ID 'ZSCMBAR'.
+
+*------------add by yakir at 26.11.2019 15:27:52------end--*
+
+  ""子级hu列表
+  DATA(lt_son) = it_data[].
+  lt_hu = VALUE #( BASE lt_hu FOR wa IN lt_son
+  ( hu = |{ wa-hubox ALPHA = IN }|
+    hu_type = wa-boxtyp
+    hu_dad  = |{ wa-hupal ALPHA = IN }| ) ).
+
+*------------add by yakir at 20.11.2019 11:53:55------begin--*
+  ""新增逻辑，如果箱类型为空，就不要创建箱HU，直接把物料挂到托盘HU中
+  DELETE lt_hu WHERE hu_type IS INITIAL AND  hu IS NOT INITIAL
+  AND hu_dad IS NOT INITIAL .
+*------------add by yakir at 20.11.2019 11:53:55------end--*
+
+  ""建立所有HU 并绑定关联关系
+  LOOP AT lt_hu INTO DATA(ls_hu).
+
+    CLEAR: ls_hudata.
+
+    CALL FUNCTION 'CONVERSION_EXIT_MDLPD_INPUT'
+      EXPORTING
+        input  = ls_hu-hu_type
+      IMPORTING
+        output = lv_pmat.
+
+
+*    CALL FUNCTION 'CONVERSION_EXIT_HUID_INPUT'
+*      EXPORTING
+*        input  = ls_hu-hu
+*      IMPORTING
+*        output = ls_hu-hu.
+*    CALL FUNCTION 'CONVERSION_EXIT_HUID_INPUT'
+*      EXPORTING
+*        input  = ls_hu-hu_dad
+*      IMPORTING
+*        output = ls_hu-hu_dad.
+*    MODIFY lt_hu FROM ls_hu TRANSPORTING hu hu_dad.
+
+* 判断HU是否存在 Jeff 20240516 BEGIN
+    SELECT SINGLE guid_hu huident
+      INTO CORRESPONDING FIELDS OF ls_hudata
+      FROM /scwm/huhdr
+      WHERE lgnum   = iv_lgnum AND
+            huident = ls_hu-hu AND
+            ( vhi   = space OR
+              vhi   = 'B' ).
+    IF sy-subrc = 0.    "存在则修改HU
+
+      CLEAR ls_guid.
+      ls_guid-guid = ls_hudata-guid_hu.
+      ls_guid-hu = ls_hu-hu.
+      APPEND ls_guid TO lt_guid.
+
+    ELSE.               "不存在则创建HU
+* 判断HU是否存在 Jeff 20240516 END
+
+      CALL METHOD lo_pack->/scwm/if_pack_bas~create_hu(
+        EXPORTING
+          iv_pmat    = lv_pmat
+          iv_huident = ls_hu-hu
+        RECEIVING
+*         es_huhdr   = DATA(ls_hudata)
+          es_huhdr   = ls_hudata
+        EXCEPTIONS
+          error      = 1
+          OTHERS     = 2 ).
+
+
+      IF sy-subrc EQ 0.
+
+        CLEAR ls_guid.
+        ls_guid-guid = ls_hudata-guid_hu.
+        ls_guid-hu = ls_hu-hu.
+        APPEND ls_guid TO lt_guid.
+
+        IF ls_hu-hu_dad IS NOT INITIAL.
+*        SELECT SINGLE guid_hu
+*          FROM /scwm/huhdr
+*          INTO @DATA(lv_hu_guid)
+*          WHERE huident EQ @ls_hu-hu_dad.
+
+          CALL METHOD lo_pack->/scwm/if_pack_bas~pack_hu(
+            EXPORTING
+              iv_source_hu = ls_hudata-guid_hu
+              iv_dest_hu   = lt_guid[ hu = ls_hu-hu_dad ]-guid
+            EXCEPTIONS
+              error        = 1
+              OTHERS       = 2 ).
+
+          IF sy-subrc NE 0.
+
+            MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                    INTO DATA(mtext)
+                    WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+            gs_msg-msg_type = 'E'.
+            gs_msg-msg_content = gs_msg-msg_content && '——执行打包时出现错误，HU绑定关系失败，消息如下：'
+            && mtext.
+
+            CALL FUNCTION 'ZFM_EWM_DEL_DN'
+              EXPORTING
+                iv_dn    = iv_dn
+                iv_lgnum = iv_lgnum
+                iv_type  = '1'.
+
+            IF lv_109 IS NOT INITIAL.
+              CALL FUNCTION 'BAPI_GOODSMVT_CANCEL'
+                EXPORTING
+                  materialdocument    = lv_109
+                  matdocumentyear     = sy-datum+0(4)
+                  goodsmvt_pstng_date = sy-datum
+                  goodsmvt_pr_uname   = sy-uname
+                TABLES
+                  return              = lt_cancel.
+              IF NOT line_exists( lt_cancel[ type = 'E' ] )
+              AND NOT line_exists( lt_cancel[ type = 'A' ] ).
+                CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+                  EXPORTING
+                    wait = abap_true.
+              ELSE.
+                CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+              ENDIF.
+            ENDIF.
+
+
+
+            RETURN.
+          ENDIF.
+
+        ENDIF.
+
+      ELSE.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                INTO mtext
+                WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = gs_msg-msg_content && '——执行打包时出现错误，创建HU失败，消息如下：'
+        && mtext.
+
+        CALL FUNCTION 'ZFM_EWM_DEL_DN'
+          EXPORTING
+            iv_dn    = iv_dn
+            iv_lgnum = iv_lgnum
+            iv_type  = '1'.
+
+        IF lv_109 IS NOT INITIAL.
+          CALL FUNCTION 'BAPI_GOODSMVT_CANCEL'
+            EXPORTING
+              materialdocument    = lv_109
+              matdocumentyear     = sy-datum+0(4)
+              goodsmvt_pstng_date = sy-datum
+              goodsmvt_pr_uname   = sy-uname
+            TABLES
+              return              = lt_cancel.
+          IF NOT line_exists( lt_cancel[ type = 'E' ] )
+          AND NOT line_exists( lt_cancel[ type = 'A' ] ).
+            CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+              EXPORTING
+                wait = abap_true.
+          ELSE.
+            CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+          ENDIF.
+        ENDIF.
+
+
+        RETURN.
+
+      ENDIF.
+
+    ENDIF.    "Jeff 20240522 HU打包增加是否存在HU的判断
+
+
+  ENDLOOP.
+
+
+  ""把物料放置到BOX中
+
+  LOOP AT it_data INTO DATA(ls_data).
+    CLEAR ls_quan.
+    CLEAR ls_pg.
+    CLEAR ls_mat.
+
+
+    READ TABLE lt_docid
+    INTO DATA(ls_docid)
+    WITH KEY refitemno = ls_data-dn_item
+             refdocno = iv_dn.
+    IF sy-subrc EQ 0.
+      ls_mat-qdocid = ls_docid-docid.
+      ls_mat-qitmid = ls_docid-itemid.
+    ENDIF.
+
+
+    ""有无启用评估数量?
+    IF ls_data-pg_unit IS INITIAL.
+      ls_quan-quan = ls_data-menge.
+      ls_quan-unit = ls_data-meins.
+    ELSE.
+      ls_quan-quan = 1.
+      ls_quan-unit = ls_data-pg_unit.
+      ls_pg-quan = ls_data-menge.
+      ls_pg-unit = ls_data-meins.
+      DATA(lv_status) = 'A'.
+    ENDIF.
+
+*    SELECT SINGLE guid_hu
+*      FROM /scwm/huhdr
+*      INTO @lv_hu_guid
+*      WHERE huident EQ @ls_data-hubox.
+*------------add by yakir at 20.11.2019 11:57:25------begin--*
+    IF ls_data-hubox IS NOT INITIAL AND ls_data-boxtyp IS INITIAL.
+      DATA(lv_guid) = lt_guid[ hu = |{ ls_data-hupal ALPHA = IN }| ]-guid.
+    ELSE.
+      lv_guid = lt_guid[ hu = |{ ls_data-hubox ALPHA = IN }| ]-guid.
+    ENDIF.
+*------------add by yakir at 20.11.2019 11:57:25------end--*
+
+
+    CALL METHOD lo_pack->/scwm/if_pack_bas~pack_stock
+      EXPORTING
+        iv_dest_hu   = lv_guid
+        is_material  = ls_mat
+        is_quantity  = ls_quan
+        is_valuation = ls_pg
+        iv_cwexact   = lv_status
+      IMPORTING
+        es_quantity  = ls_quan
+      EXCEPTIONS
+        error        = 1
+        OTHERS       = 2.
+    IF sy-subrc NE 0 .
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              INTO mtext
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = gs_msg-msg_content && '——执行打包时出现错误，物料包装失败，消息如下：'
+      && mtext.
+
+      CALL FUNCTION 'ZFM_EWM_DEL_DN'
+        EXPORTING
+          iv_dn    = iv_dn
+          iv_lgnum = iv_lgnum
+          iv_type  = '1'.
+
+      IF lv_109 IS NOT INITIAL.
+        CALL FUNCTION 'BAPI_GOODSMVT_CANCEL'
+          EXPORTING
+            materialdocument    = lv_109
+            matdocumentyear     = sy-datum+0(4)
+            goodsmvt_pstng_date = sy-datum
+            goodsmvt_pr_uname   = sy-uname
+          TABLES
+            return              = lt_cancel.
+        IF NOT line_exists( lt_cancel[ type = 'E' ] )
+        AND NOT line_exists( lt_cancel[ type = 'A' ] ).
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+            EXPORTING
+              wait = abap_true.
+        ELSE.
+          CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+        ENDIF.
+      ENDIF.
+
+
+      RETURN.
+    ENDIF.
+  ENDLOOP.
+
+
+
+
+  lo_pack->/scwm/if_pack_bas~save( ).
+  lo_pack->/scwm/if_pack_bas~cleanup( ).
+
+  gs_msg-msg_type = 'S'.
+  gs_msg-msg_content = gs_msg-msg_content && '——执行打包完成!'.
+
+
+  ""对IDN入库单进行收货
+  DATA(lv_docid) = lt_docid[ 1 ]-docid.
+  DATA lt_return TYPE /scdl/dm_message_tab.
+
+
+  SELECT SINGLE docid,doccat
+    FROM  /scdl/db_proch_i
+    INTO (@DATA(lv_docid_dn),@DATA(lv_doccat))
+    WHERE docid EQ @lv_docid.
+
+  IF sy-subrc EQ 0.
+
+    CALL FUNCTION 'ZEWM_POST_GM'
+      EXPORTING
+        ip_docid  = lv_docid_dn
+        ip_doccat = lv_doccat
+        ip_lgnum  = iv_lgnum
+        iv_gmcat  = /scwm/if_docflow_c=>sc_gr
+      IMPORTING
+        ep_mes    = lt_return.
+
+    IF NOT line_exists( lt_return[ msgty = 'E'] )
+    AND NOT line_exists( lt_return[ msgty = 'A'] ) .
+
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = gs_msg-msg_content && '——收货执行完成!'.
+
+
+    ELSE.
+
+      DATA(ls_ret) = lt_return[ msgty = 'E' ].
+      MESSAGE ID ls_ret-msgid TYPE ls_ret-msgty NUMBER ls_ret-msgno
+              INTO mtext
+              WITH ls_ret-msgv1 ls_ret-msgv2 ls_ret-msgv3 ls_ret-msgv4.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = gs_msg-msg_content && '——执行收货时发生错误,错误消息：'
+      && mtext.
+      RETURN.
+    ENDIF.
+
+  ELSE.
+    gs_msg-msg_type = 'E'.
+    gs_msg-msg_content = gs_msg-msg_content && '——执行收货时发生错误,找不到对应的交货单！'.
+    RETURN.
+  ENDIF.
+
+
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

@@ -1,0 +1,199 @@
+FUNCTION zfm_scm_hu_message.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     REFERENCE(LV_HUIDENT) TYPE  /SCWM/DE_HUIDENT
+*"  TABLES
+*"      ET_BOX STRUCTURE  ZEWMS004
+*"      ET_PAL STRUCTURE  ZEWMS002
+*"----------------------------------------------------------------------
+
+  DATA: BEGIN OF ls_out,
+          barcode   TYPE char20,
+          querytype TYPE char1,
+        END OF ls_out.
+
+
+  ls_out-barcode = |{ lv_huident ALPHA = OUT }|.
+  ls_out-querytype = '2'.
+
+  DATA lv_json1 TYPE  string.
+  DATA lv_json2 TYPE  string.
+
+  "HU转为JSON
+  lv_json1 = /ui2/cl_json=>serialize( ls_out ).
+
+
+  ""转换大小写
+  TRANSLATE lv_json1 TO LOWER CASE.
+  REPLACE SECTION OFFSET 5 LENGTH 1  OF lv_json1 WITH 'C'.
+  REPLACE SECTION OFFSET 32 LENGTH 1  OF lv_json1 WITH 'T'.
+
+
+  ""获取SCM HU信息的JSON
+  CALL FUNCTION 'ZFM_SCM_GET_HU_JSON'
+    EXPORTING
+      iv_json = lv_json1
+    IMPORTING
+      ev_json = lv_json2.
+
+
+  """json纵深结构定义 ls_result
+  TYPES:BEGIN OF ty_box,
+          boxcode       TYPE string,
+          sapordernum   TYPE string,
+          sapprojectnum TYPE string,
+          boxunit       TYPE string, "单位
+          amount        TYPE string, "数量
+          palletcode    TYPE string, "托盘条码号
+          producedate   TYPE string, ""生产日期
+        END OF ty_box.
+
+  DATA lt_box TYPE TABLE OF ty_box.
+
+  TYPES:BEGIN OF ty_pallet,
+          palletcode    TYPE string,
+          sapordernum   TYPE string,
+          sapprojectnum TYPE string,
+          boxamount     TYPE string,
+          amount        TYPE string,
+          palletunit    TYPE string,
+          boxlist       LIKE lt_box,
+
+        END OF ty_pallet.
+
+  TYPES:BEGIN OF ty_order,
+          orderid    TYPE string, "采购订单
+          projectid  TYPE string, "采购订单行项目
+          packtype   TYPE string,
+          box        TYPE ty_box,
+          pallet     TYPE ty_pallet,
+          mattercode TYPE string, "物料
+          matterinfo TYPE string, "物料描述
+        END OF ty_order.
+
+  DATA: BEGIN OF ls_result,
+          msg   TYPE string,
+          order TYPE ty_order,
+        END OF ls_result.
+
+
+  "将获取到SCM HU信息的JSON 转换为纵深的格式
+  /ui2/cl_json=>deserialize(
+  EXPORTING json = lv_json2
+  CHANGING data = ls_result ).
+
+  IF ls_result IS NOT INITIAL.
+
+
+    IF ls_result-order-box-boxcode IS NOT INITIAL."箱
+
+      et_box-hupal = ls_result-order-box-palletcode.
+      et_box-paltyp = 'PALLET'.
+      et_box-hubox = ls_result-order-box-boxcode.
+      et_box-vbeln = |{ ls_result-order-box-sapordernum ALPHA = IN }|.
+      et_box-dn_item = ls_result-order-box-sapprojectnum.
+      et_box-boxtyp = 'BOX'.
+      et_box-matnr = ls_result-order-mattercode.
+      et_box-maktx = ls_result-order-matterinfo.
+      et_box-menge = ls_result-order-box-amount.
+      et_box-mseh3 = ls_result-order-box-boxunit.
+
+      CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+        EXPORTING
+          input          = et_box-mseh3
+        IMPORTING
+          output         = et_box-meins
+        EXCEPTIONS
+          unit_not_found = 1
+          OTHERS         = 2.
+
+
+      et_box-ebeln = ls_result-order-orderid.
+      et_box-ebelp = ls_result-order-projectid.
+
+      REPLACE '-'  INTO ls_result-order-box-producedate WITH ``.
+
+
+      SELECT SINGLE lips~charg,mch1~hsdat
+      FROM lips
+      JOIN mch1 ON mch1~matnr EQ @et_box-matnr
+      AND mch1~charg EQ lips~charg
+      WHERE lips~vbeln = @et_box-vbeln
+      AND lips~posnr = @et_box-dn_item
+      INTO CORRESPONDING FIELDS OF @et_box.
+      et_box-hsdatj = et_box-hsdat.
+
+      APPEND et_box.
+
+    ELSE."箱和托盘
+
+      LOOP AT ls_result-order-pallet-boxlist INTO DATA(ls_box).
+
+        et_box-hupal = ls_box-palletcode.
+        et_box-paltyp = 'PALLET'.
+        et_box-hubox = ls_box-boxcode.
+        et_box-vbeln = |{ ls_box-sapordernum ALPHA = IN }|.
+        et_box-dn_item = ls_box-sapprojectnum.
+        et_box-boxtyp = 'BOX'.
+        et_box-matnr = ls_result-order-mattercode.
+        et_box-maktx = ls_result-order-matterinfo.
+        et_box-menge = ls_box-amount.
+        et_box-mseh3 = ls_box-boxunit.
+
+        CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+          EXPORTING
+            input          = et_box-mseh3
+          IMPORTING
+            output         = et_box-meins
+          EXCEPTIONS
+            unit_not_found = 1
+            OTHERS         = 2.
+
+        et_box-ebeln = ls_result-order-orderid.
+        et_box-ebelp = ls_result-order-projectid.
+
+
+
+        SELECT SINGLE lips~charg,mch1~hsdat
+        FROM lips
+        JOIN mch1 ON mch1~matnr EQ @et_box-matnr
+                  AND mch1~charg EQ lips~charg
+        WHERE lips~vbeln = @et_box-vbeln
+        AND lips~posnr = @et_box-dn_item
+        INTO CORRESPONDING FIELDS OF @et_box.
+
+        et_box-hsdatj = et_box-hsdat.
+
+        APPEND et_box.
+
+      ENDLOOP.
+      IF et_box[] IS NOT INITIAL.
+        et_pal-hupal = ls_result-order-pallet-palletcode.
+        et_pal-paltyp = 'PALLET'.
+        et_pal-boxnu = ls_result-order-pallet-boxamount.
+        et_pal-matnr = ls_result-order-mattercode.
+        et_pal-maktx = ls_result-order-matterinfo.
+        et_pal-to_nu = ls_result-order-pallet-amount.
+        et_pal-meins = et_box[ 1 ]-meins.
+        et_pal-mseh3 = et_box[ 1 ]-mseh3.
+
+        APPEND et_pal.
+
+      ENDIF.
+
+
+
+    ENDIF.
+  ENDIF.
+
+
+
+
+
+
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

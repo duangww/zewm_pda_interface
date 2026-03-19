@@ -1,0 +1,178 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD res_logoff.
+
+
+    DATA :BEGIN OF gs_resource ,
+            lgnum TYPE 	/scwm/lgnum,
+            rsrc  TYPE  /scwm/de_rsrc,
+            uname TYPE  xubname,
+          END OF gs_resource .
+
+    DATA:ls_user_log TYPE  /scwm/usr_st_log.
+    DATA ls_resource TYPE /scwm/rsrc.
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = gs_resource ).
+
+    IF gs_resource IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    TRANSLATE gs_resource-rsrc TO UPPER CASE.
+    TRANSLATE gs_resource-uname TO UPPER CASE.
+
+
+    SELECT SINGLE lgnum,rsrc
+      INTO @DATA(ls_res)
+      FROM /scwm/rsrc
+      WHERE lgnum = @gs_resource-lgnum
+        AND rsrc = @gs_resource-rsrc    .
+
+    IF sy-subrc NE 0 .
+      gs_msg-msg_type = 'E' .
+      gs_msg-msg_content =  '在仓库编号' && gs_resource-lgnum
+       &&  '中不存在资源' && gs_resource-rsrc .
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+
+    ELSE.
+      "判断资源和用户是否匹配
+      SELECT COUNT(*)
+        FROM /scwm/rsrc
+        WHERE lgnum = @gs_resource-lgnum
+        AND   rsrc = @gs_resource-rsrc
+        AND   uname EQ @gs_resource-uname.
+
+      IF sy-subrc NE 0.
+        gs_msg-msg_type = 'S' .
+        gs_msg-msg_content =  '在仓库编号' && gs_resource-lgnum
+         &&  '中资源' && gs_resource-rsrc && '未被当前账户锁定！'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        RETURN.
+
+      ELSE.
+
+
+        CALL FUNCTION '/SCWM/RSRC_READ_SINGLE'
+          EXPORTING
+            iv_lgnum  = gs_resource-lgnum
+            iv_rsrc   = gs_resource-rsrc
+          IMPORTING
+            es_rsrc   = ls_resource
+          EXCEPTIONS
+            not_found = 1
+            OTHERS    = 2.
+
+        ls_resource-uname  = space.
+        ls_resource-rfind  = space.
+
+        CALL FUNCTION '/SCWM/RSRC_RESOURCE_SET'
+          EXPORTING
+            iv_action = wmegc_update
+            is_rsrc   = ls_resource.
+
+        CLEAR ls_user_log.
+        ls_user_log-lgnum = gs_resource-lgnum.
+        ls_user_log-rsrc = gs_resource-rsrc.
+        ls_user_log-uname  = gs_resource-uname.
+        ls_user_log-status = cn_b."gc_user_logged_off.
+        SELECT SINGLE tstmp
+          FROM /scwm/usr_st_log
+          INTO ls_user_log-tstmp
+          WHERE lgnum EQ ls_user_log-lgnum
+            AND rsrc EQ ls_user_log-rsrc
+            AND uname EQ ls_user_log-uname
+            AND status EQ cn_a.
+*        GET TIME STAMP FIELD ls_user_log-tstmp.
+
+        CALL FUNCTION '/SCWM/RSRC_USER_LOG_SET'
+          EXPORTING
+            iv_action   = wmegc_update
+            is_user_log = ls_user_log.
+
+        gs_msg-msg_type = 'S'.
+        gs_msg-msg_content = '资源注销成功！'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      ENDIF.
+
+    ENDIF.
+
+** Read resource to get all resource data.
+*    CALL FUNCTION '/SCWM/RSRC_READ_SINGLE'
+*      EXPORTING
+*        iv_lgnum  = gs_resource-lgnum
+*        iv_rsrc   = gs_resource-rsrc
+*      IMPORTING
+*        es_rsrc   = ls_resource
+*      EXCEPTIONS
+*        not_found = 1
+*        OTHERS    = 2.
+*    IF sy-subrc <> 0.
+*      CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+*        EXPORTING
+*          msgid               = sy-msgid
+*          msgnr               = sy-msgid
+*          msgv1               = sy-msgv1
+*          msgv2               = sy-msgv2
+*          msgv3               = sy-msgv2
+*          msgv4               = sy-msgv2
+*        IMPORTING
+*          message_text_output = gs_msg-msg_content.
+*
+*      gs_msg-msg_type = 'E' .
+*
+*      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+*      RETURN.
+*    ENDIF.
+*
+*    IF ls_resource-uname IS NOT INITIAL.
+*      DATA(lv_temp) = ls_resource.
+*
+*      CLEAR: ls_resource-uname, ls_resource-rfind, ls_resource-ltrans,
+*      ls_resource-ltranschg_at, ls_resource-act_queue,
+*      ls_resource-lgtyp,
+*      ls_resource-semi_lgpla,
+*      ls_resource-semi_queue,
+*      ls_resource-semi_queue_chg,
+*      ls_resource-rec_grp,
+*      ls_resource-grp_leave_time,
+*      ls_resource-act_xcoord,
+*      ls_resource-act_ycoord,
+*      ls_resource-curr_act_type,
+*      ls_resource-recgrp_entrytime,
+*      ls_resource-work_in_recgrp,
+*      ls_resource-recactive.
+*    ELSE.
+**   Clear user name from resource
+*      gs_msg-msg_type = 'E'.
+*      gs_msg-msg_content = '此用户已注销资源，请勿重复注销！'.
+*      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+*      RETURN .
+*    ENDIF.
+*
+** Update resource record in DB
+*    CALL FUNCTION '/SCWM/RSRC_RESOURCE_SET'
+*      EXPORTING
+*        iv_action = wmegc_update
+*        is_rsrc   = ls_resource.
+
+* Set log with status, timestamp, reason
+*    MOVE-CORRESPONDING ls_resource TO ls_usr_st_log.
+
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

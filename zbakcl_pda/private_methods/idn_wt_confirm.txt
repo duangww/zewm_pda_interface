@@ -1,0 +1,194 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD idn_wt_confirm.
+
+
+    DATA ls_data TYPE zewm_wt.
+    DATA lt_data TYPE TABLE OF zewm_wt.
+
+    DATA lt_conf TYPE /scwm/to_conf_tt.
+    DATA lt_conf_exc TYPE /scwm/tt_conf_exc.
+    DATA lw_conf TYPE /scwm/to_conf.
+    DATA lw_conf_exc TYPE /scwm/s_conf_exc.
+    DATA lt_return TYPE bapirettab.
+    DATA ls_who TYPE /scwm/s_who_int.
+    DATA lt_who TYPE TABLE OF /scwm/s_who_int.
+
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    DATA gt_msg LIKE TABLE OF gs_msg.
+
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+    REPLACE ALL OCCURRENCES OF '"TASK":'  IN lv_cdata WITH space.
+    SHIFT lv_cdata LEFT DELETING LEADING '{'.
+    SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+
+
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_data ).
+
+
+    IF lt_data IS INITIAL.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      RETURN.
+    ENDIF.
+
+    DATA(lt_temp) = lt_data.
+    SORT lt_temp BY who.
+    DELETE ADJACENT DUPLICATES FROM lt_temp COMPARING who.
+
+    IF lines( lt_temp ) > 1.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '目前仅支持 一次确认 一个订单下的所有任务！'.
+      ev_json = /ui2/cl_json=>serialize( gs_msg ).
+      ev_json = '{ "MESSAGE":' && ev_json && '}'.
+      RETURN.
+    ENDIF.
+
+
+    LOOP AT lt_data INTO ls_data.
+      SELECT SINGLE lgtyp
+        FROM /scwm/lagp
+        WHERE lgnum = @ls_data-lgnum
+        AND lgpla = @ls_data-nlpla
+        INTO @DATA(lv_lgtyp).
+      IF sy-subrc NE 0.
+        CLEAR lv_lgtyp.
+      ENDIF.
+      TRANSLATE ls_data-lgnum TO UPPER CASE.
+      TRANSLATE ls_data-uname TO UPPER CASE.
+      ""ADD BY VICKY 07.06.2021 15:34:08
+      AUTHORITY-CHECK OBJECT '/SCWM/TOCR'
+      FOR USER ls_data-uname
+       ID '/SCWM/LGNU' FIELD ls_data-lgnum
+       ID '/SCWM/LGTY' FIELD lv_lgtyp.
+      IF sy-subrc <> 0.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '仓库编号/仓位：' && ls_data-lgnum && '/' && ls_data-nlpla && '无权限'.
+        ev_json = /ui2/cl_json=>serialize( gs_msg ).
+        ev_json = '{ "MESSAGE":[' && ev_json && ']}'.
+        RETURN.
+      ENDIF.
+
+*      REFRESH lt_conf.
+*      REFRESH lt_conf_exc.
+*      REFRESH lt_return.
+      TRANSLATE ls_data-uname TO UPPER CASE.
+      TRANSLATE ls_data-rsrc TO UPPER CASE.
+      TRANSLATE ls_data-nlpla TO UPPER CASE.
+      ls_data-vlenr = |{ ls_data-vlenr ALPHA = IN }|.
+      ls_data-nlenr = |{ ls_data-nlenr ALPHA = IN }|.
+      MODIFY lt_data FROM ls_data.
+      CLEAR lw_conf.
+      lw_conf-tanum = ls_data-tanum.
+
+      SELECT SINGLE noitm
+        FROM /scwm/ordim_o
+        INTO ls_data-noitm
+        WHERE tanum EQ ls_data-tanum
+          AND lgnum EQ ls_data-lgnum.
+      lw_conf-papos = ls_data-noitm + 1.
+      lw_conf-nista = ls_data-vsolm.
+      lw_conf-altme = ls_data-meins.
+      lw_conf-vlenr = ls_data-vlenr.
+      lw_conf-nlenr = ls_data-nlenr.
+      lw_conf-nlpla = ls_data-nlpla.
+*      lw_conf-drsrc = ls_data-rsrc.
+      APPEND lw_conf TO lt_conf.
+
+      CLEAR lw_conf_exc.
+      lw_conf_exc-tanum = ls_data-tanum.
+      lw_conf_exc-papos = ls_data-noitm + 1.
+      lw_conf_exc-exccode  = 'CHBD'.
+      lw_conf_exc-buscon   =  'TIM'.
+      lw_conf_exc-exec_step = '01'.
+      APPEND lw_conf_exc TO lt_conf_exc.
+    ENDLOOP.
+
+    CALL FUNCTION '/SCWM/TO_CONFIRM'
+      EXPORTING
+        iv_lgnum       = lt_data[ 1 ]-lgnum
+        it_conf        = lt_conf
+        it_conf_exc    = lt_conf_exc
+        iv_commit_work = space
+        iv_update_task = space
+        iv_qname       = lt_data[ 1 ]-uname
+      IMPORTING
+        et_bapiret     = lt_return.
+
+
+    IF NOT line_exists( lt_return[ type = 'E' ] )
+      AND NOT line_exists( lt_return[ type = 'A' ] ).
+
+      COMMIT WORK AND WAIT.
+      CLEAR gs_msg.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '仓库订单确认完成！'.
+      gs_msg-who = ls_data-who.
+      APPEND gs_msg TO gt_msg.
+
+      ""更新资源
+      CALL FUNCTION '/SCWM/WHO_GET'
+        EXPORTING
+          iv_lgnum      = lt_data[ 1 ]-lgnum
+          iv_whoid      = lt_data[ 1 ]-who "WHO number
+        IMPORTING
+          es_who        = ls_who
+        EXCEPTIONS
+          /scwm/cx_core = 1
+          OTHERS        = 2.
+      IF sy-subrc EQ 0.
+        ls_who-rsrc = lt_data[ 1 ]-rsrc ."Resource number
+        SELECT COUNT(*)
+        FROM  /scwm/ordim_o
+        WHERE who EQ ls_who-who.
+
+        IF sy-subrc EQ 0.
+          ls_who-status = cn_d.
+        ELSE.
+          ls_who-status = cn_c.
+        ENDIF.
+        ls_who-updkz = cn_u."change indicator: D-delete.I-insert,U-update
+        GET TIME STAMP FIELD ls_who-confirmed_at.
+        ls_who-confirmed_by = lt_data[ 1 ]-uname.
+        APPEND ls_who TO lt_who.
+        CALL FUNCTION '/SCWM/WHO_DB_UPDATE'
+          EXPORTING
+            it_who = lt_who.
+      ENDIF.
+
+
+    ELSE.
+
+      ROLLBACK WORK.
+
+      DATA(ls_return) = lt_return[ type = 'E' ].
+
+      MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+              INTO DATA(mtext)
+              WITH ls_return-message_v1 ls_return-message_v2 ls_return-message_v3 ls_return-message_v4.
+
+      CLEAR gs_msg.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '仓库订单确认失败！原因：'
+      && mtext.
+      gs_msg-who = ls_data-who.
+      APPEND gs_msg TO gt_msg.
+    ENDIF.
+
+
+
+    ev_json = /ui2/cl_json=>serialize( gt_msg ).
+    ev_json = '{ "MESSAGE":' && ev_json && '}'.
+
+
+
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

@@ -1,0 +1,6 @@
+FUNCTION-POOL ZFG_EWM.                      "MESSAGE-ID ..
+
+* INCLUDE LZFG_EWMD...                       " Local class definition
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

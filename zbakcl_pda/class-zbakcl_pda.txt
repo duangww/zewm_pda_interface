@@ -1,0 +1,196 @@
+**************************************************************************
+*   Class attributes.                                                    *
+**************************************************************************
+Instantiation: Public
+Message class:
+State: Implemented
+Final Indicator: X
+R/3 Release: 751
+
+**************************************************************************
+*   Public section of class.                                             *
+**************************************************************************
+class ZBAKCL_PDA definition
+  public
+  final
+  create public .
+
+public section.
+
+  interfaces IF_HTTP_EXTENSION .
+
+  constants CN_B type CHAR1 value 'B' ##NO_TEXT.
+  class-data GV_REQUEST_ID type ZREQUEST_ID .
+
+**************************************************************************
+*   Private section of class.                                            *
+**************************************************************************
+private section.
+
+  constants CN_Z301 type CHAR4 value 'Z301' ##NO_TEXT.
+  constants C_ACTION type STRING value 'ACTION' ##NO_TEXT.
+  data GS_MSG type ZBAKS_MSG_PDA .
+  constants CN_1 type CHAR1 value '1' ##NO_TEXT.
+  constants CN_2 type CHAR1 value '2' ##NO_TEXT.
+  constants CN_3 type CHAR1 value '3' ##NO_TEXT.
+  constants CN_4 type CHAR1 value '4' ##NO_TEXT.
+  constants CN_A type CHAR1 value 'A' ##NO_TEXT.
+  constants CN_C type CHAR1 value 'C' ##NO_TEXT.
+  constants CN_D type CHAR1 value 'D' ##NO_TEXT.
+  constants CN_P type CHAR1 value 'P' ##NO_TEXT.
+  constants CN_U type CHAR1 value 'U' ##NO_TEXT.
+  constants CN_BARCODE type CHAR20 value 'ZBARCODE_ID' ##NO_TEXT.
+  constants CN_LGN type CHAR20 value '/SCWM/LGN' ##NO_TEXT.
+  constants CN_LGORT_109 type LGORT_D value 'D999' ##NO_TEXT.
+  constants CN_SHKZG type CHAR1 value 'S' ##NO_TEXT.
+
+  methods USR_LOGIN
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods QUERY_CHARG
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods QUERY_HU
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods INBOUND_DN_BY_PO
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods INBOUND_DN_BY_STO
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods HU_RELATION
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods GOODSMVT_CREATE
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods WO_QUERY
+    importing
+      IO_REQUEST type ref to IF_HTTP_REQUEST
+    exporting
+      EV_JSON type STRING .
+  methods DORDER_QUERY
+    importing
+      IO_REQUEST type ref to IF_HTTP_REQUEST
+    exporting
+      EV_JSON type STRING .
+  methods RES_LOGIN
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods RES_LOGOFF
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods IDN_WT_CREATE
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods IDN_WT_CONFIRM
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods EWM_HU_DATA
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods ODN_WT_CREATE
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods ODN_WT_CONFIRM
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods ODN_PGI
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods MOVE_HU
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods STOCK_INQUIRY
+    importing
+      IO_REQUEST type ref to IF_HTTP_REQUEST
+    exporting
+      EV_JSON type STRING .
+  methods PI_CALL_DOCUMENT_CREATE
+    importing
+      IO_REQUEST type ref to IF_HTTP_REQUEST
+    exporting
+      EV_JSON type STRING .
+  methods PI_CALL_DOCUMENT_COUNT
+    importing
+      IO_REQUEST type ref to IF_HTTP_REQUEST
+    exporting
+      EV_JSON type STRING .
+  methods BIN_TYPE_INQUIRY
+    importing
+      IO_REQUEST type ref to IF_HTTP_REQUEST
+    exporting
+      EV_JSON type STRING .
+  methods WH_COMPARE
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods BARCODE_INIT
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods UPDATE_HU
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods GET_PHYSICAL_STOCK
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+  methods GET_STOCK
+    importing
+      value(IO_REQUEST) type ref to IF_HTTP_REQUEST
+    exporting
+      value(EV_JSON) type STRING .
+
+**************************************************************************
+*   Protected section of class.                                          *
+**************************************************************************
+protected section.
+
+**************************************************************************
+*   Types section of class.                                              *
+**************************************************************************
+*"* dummy include to reduce generation dependencies between
+*"* class ZBAKCL_PDA and it's users.
+*"* touched if any type reference has been changed
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

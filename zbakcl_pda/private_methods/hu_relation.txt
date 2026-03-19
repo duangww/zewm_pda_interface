@@ -1,0 +1,473 @@
+**************************************************************************
+*   Method attributes.                                                   *
+**************************************************************************
+Instantiation: Private
+**************************************************************************
+
+  METHOD hu_relation.
+    DATA lt_in TYPE TABLE OF zewms003."传入表
+    DATA lt_error TYPE TABLE OF zewms003."组托失败记录表
+    DATA lt_hupal TYPE TABLE OF zewms003."父HU未空，取号后相关的记录表
+    DATA ls_hu TYPE zzbcrl_hu.  "更改HU关系表结构
+    DATA ls_code TYPE zewmbarcode."更改条码信息表结构
+    DATA gt_msg TYPE TABLE OF zbaks_msg_pda.
+
+    REFRESH: lt_error,lt_in.
+    CLEAR:ls_hu,ls_code.
+
+    ""接口传入表处理
+    DATA(lv_cdata) = io_request->get_cdata( ).
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_cdata WITH space.
+    REPLACE ALL OCCURRENCES OF '"data":'  IN lv_cdata WITH space.
+    SHIFT lv_cdata LEFT DELETING LEADING '{'.
+    SHIFT lv_cdata RIGHT DELETING TRAILING '}'.
+    /ui2/cl_json=>deserialize(
+    EXPORTING json = lv_cdata CHANGING data = lt_in ).
+
+*------------add by yakir at 12.11.2019 08:07:11------begin--*
+    LOOP AT lt_in ASSIGNING FIELD-SYMBOL(<fs_in>).
+      TRANSLATE <fs_in>-ernam TO UPPER CASE.
+    ENDLOOP.
+*------------add by yakir at 12.11.2019 08:07:11------end--*
+
+
+    ""将条码关系写入 zzbcrl_hu
+    "" 如果父阶HU是托盘，将父阶HU和类型：PALLET也写入 zewmbarcode
+
+    IF lt_in IS INITIAL.
+      CLEAR gs_msg.
+      gs_msg-msg_type = 'E'.
+      gs_msg-msg_content = '请输入数据！'.
+      APPEND gs_msg TO gt_msg.
+      ev_json = /ui2/cl_json=>serialize( gt_msg[] ).
+      CONCATENATE '{"MESSAGE":' ev_json '}' INTO ev_json.
+      RETURN.
+    ENDIF.
+
+    "如果存在父HU为空，取一托盘号
+    IF line_exists( lt_in[ hupal = '' ] ).
+
+      DATA lv_hupal TYPE ze_hupar.
+      CLEAR lv_hupal.
+      CALL FUNCTION 'ZFM_EWM_HUPACK'
+        IMPORTING
+          e_hupal = lv_hupal.
+    ENDIF.
+
+    LOOP AT lt_in INTO DATA(ls_in).
+      CALL FUNCTION 'CONVERSION_EXIT_HUID_INPUT'
+        EXPORTING
+          input  = ls_in-hubox
+        IMPORTING
+          output = ls_in-hubox. "加前导零
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = ls_in-hupal
+        IMPORTING
+          output = ls_in-hupal.
+
+      SELECT COUNT(*) FROM zzbcrl_hu WHERE hubox = ls_in-hubox.
+      IF sy-subrc = 0.
+        CLEAR gs_msg.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '箱条码' && ls_in-hubox
+        && '已组托，不可重复组托！'.
+        APPEND gs_msg TO gt_msg.
+        APPEND  ls_in TO lt_error.
+        CONTINUE.
+
+      ENDIF.
+    ENDLOOP.
+
+    IF gt_msg IS NOT INITIAL.
+      ev_json = /ui2/cl_json=>serialize( gt_msg[] ).
+      CONCATENATE '{"MESSAGE":' ev_json '}' INTO ev_json.
+      RETURN.
+    ENDIF.
+
+
+
+    LOOP AT lt_in INTO ls_in.
+      CALL FUNCTION 'CONVERSION_EXIT_HUID_INPUT'
+        EXPORTING
+          input  = ls_in-hubox
+        IMPORTING
+          output = ls_in-hubox. "加前导零
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = ls_in-hupal
+        IMPORTING
+          output = ls_in-hupal.
+
+*      SELECT COUNT(*) FROM zzbcrl_hu WHERE hubox = ls_in-hubox.
+*      IF sy-subrc = 0.
+*        CLEAR gs_msg.
+*        gs_msg-msg_type = 'E'.
+*        gs_msg-msg_content = '箱条码' && ls_in-hubox
+*        && '已组托，不可重复组托！'.
+*        APPEND gs_msg TO gt_msg.
+*        APPEND  ls_in TO lt_error.
+*        CONTINUE.
+*
+*      ENDIF.
+
+
+      "一、父HU为空,取父HU号
+      IF ls_in-hupal = ''.
+
+        IF lv_hupal = ''.
+          CLEAR gs_msg.
+          gs_msg-msg_type = 'E'.
+          gs_msg-msg_content = '箱条码' && ls_in-hubox
+                                && '的托盘条码生成失败，未组托！'.
+          APPEND gs_msg TO gt_msg.
+          APPEND  ls_in TO lt_error.
+          CONTINUE.
+        ELSE.
+          ls_in-hupal = lv_hupal.
+          ls_in-paltyp = 'PALLET'.
+          APPEND ls_in TO lt_hupal.
+        ENDIF.
+      ENDIF.
+
+
+      "二、传入父HU，将父HU写入 ZEWMBARCODE
+      CLEAR ls_code.
+      ls_code-hubox = ls_in-hupal.
+      ls_code-lgnum = ls_in-lgnum.
+      ls_code-hutyp = ls_in-paltyp.
+      ls_code-erdat = sy-datum.
+      ls_code-ertim = sy-uzeit.
+      ls_code-ernam = ls_in-ernam.
+      MODIFY zewmbarcode FROM ls_code.
+      IF sy-subrc = 0.
+        COMMIT WORK AND WAIT.
+
+        "三、创建HU成功，将父HU写入 ZEWMBARCODE 成功，将父HU 子HU写入条码关系表 ZZBCRL_HU
+        MOVE-CORRESPONDING ls_in TO ls_hu.
+        ls_hu-erdat = sy-datum.
+        ls_hu-ertim = sy-uzeit.
+        MODIFY zzbcrl_hu FROM ls_hu.
+        IF sy-subrc = 0.
+          "全部成功
+          COMMIT WORK AND WAIT.
+
+        ELSE.
+          "创建HU成功，将父HU写入 ZEWMBARCODE 成功，将父HU 子HU写入条码关系表   ZZBCRL_HU 失败
+          ROLLBACK WORK .
+          APPEND  ls_in TO lt_error.
+          CLEAR gs_msg.
+          gs_msg-msg_type = 'E'.
+          gs_msg-msg_content =   ls_in-hupal && '/' && ls_in-hubox  && ' 组托失败'.
+          APPEND gs_msg TO gt_msg.
+          CONTINUE.
+        ENDIF.
+
+      ELSE.
+        ROLLBACK WORK.
+        APPEND  ls_in TO lt_error.
+        CLEAR gs_msg.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '托盘HU' && ls_in-hupal && '存入失败,未组托'.
+        APPEND gs_msg TO gt_msg.
+
+      ENDIF.
+
+
+    ENDLOOP.
+
+
+
+
+    IF lt_error IS NOT INITIAL.
+
+      CLEAR ev_json.
+      ev_json = /ui2/cl_json=>serialize( lt_error[] ).
+      DATA(lv_json2) = ev_json.
+    ELSE.
+      gs_msg-msg_type = 'S'.
+      gs_msg-msg_content = '写入成功！'.
+      APPEND gs_msg TO gt_msg.
+
+
+      """打印
+
+      DATA:le_tdsfname TYPE tdsfname.
+      DATA ls_return TYPE	ssfcrescl. "打印返回值
+      DATA: fn_name TYPE rs38l_fnam.
+      DATA: control           TYPE ssfctrlop,
+            jobout            TYPE ssfcresop,
+            ls_composer_param TYPE ssfcompop.
+      DATA:le_tdsfname1 TYPE tdsfname.
+      DATA:le_tdsfname2 TYPE tdsfname.
+      DATA lt_sf TYPE TABLE OF zewms005.
+      DATA ls_out TYPE zewms002.
+      DATA lv_content TYPE char256.
+      CLEAR lv_content.
+
+*------------add by yakir at 05.02.2021 22:51:40------begin--*
+*      SELECT atinn,atnam
+*        FROM cabn
+*        INTO TABLE @DATA(lt_cabn)
+*        WHERE cabn~adzhl = @space
+*          AND cabn~atnam  IN ('Z_PRDBATCH','Z_CLASS','Z_SUBBATCH').
+*------------add by yakir at 05.02.2021 22:51:40------end--*
+
+
+      SELECT zzbcrl_hu~hupal,
+              a~matnr,
+              a~charg,
+              b~cuobj_bm,
+              CAST( 'ATWRT' AS CHAR( 70 ) ) AS atwrt1,
+              CAST( 'ATWRT' AS CHAR( 70 ) ) AS atwrt2,
+              CAST( 'ATWRT' AS CHAR( 70 ) ) AS atwrt3,
+              SUM( a~menge ) AS menge
+*              substring( c~atwrt,1,10 ) AS atwrt1,
+*              d~atwrt AS atwrt2
+      FROM zzbcrl_hu
+      INNER JOIN zewmbarcode AS a ON zzbcrl_hu~hubox EQ a~hubox
+      INNER JOIN mch1 AS b ON b~matnr EQ a~matnr AND b~charg EQ a~charg
+*      LEFT JOIN ausp AS  c ON c~objek = b~cuobj_bm AND c~atinn = 0000000823"BAK批次.
+*      LEFT JOIN ausp AS  d ON d~objek = b~cuobj_bm AND d~atinn = 0000000826"等级
+      WHERE zzbcrl_hu~hupal = @ls_in-hupal
+      GROUP BY zzbcrl_hu~hupal,a~charg,a~matnr,b~cuobj_bm
+      INTO TABLE @DATA(lt_print1).
+
+      IF sy-subrc = 0.
+        LOOP AT lt_print1 ASSIGNING FIELD-SYMBOL(<fs_print1>).
+          CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+            EXPORTING
+              input  = <fs_print1>-hupal
+            IMPORTING
+              output = <fs_print1>-hupal.
+
+*------------add by yakir at 05.02.2021 22:58:48------begin--*
+          SELECT SINGLE atwrt
+            FROM ausp
+            JOIN cabn ON ausp~atinn EQ cabn~atinn
+            INTO @DATA(lv_atwrt1)
+            WHERE atnam EQ 'Z_PRDBATCH'
+              AND objek EQ @<fs_print1>-cuobj_bm.
+          SELECT SINGLE atwrt
+            FROM ausp
+            JOIN cabn ON ausp~atinn EQ cabn~atinn
+            INTO @DATA(lv_atwrt2)
+            WHERE atnam EQ 'Z_CLASS'
+              AND objek EQ @<fs_print1>-cuobj_bm.
+          SELECT SINGLE atwrt
+            FROM ausp
+            JOIN cabn ON ausp~atinn EQ cabn~atinn
+            INTO @DATA(lv_atwrt3)
+            WHERE atnam EQ 'Z_SUBBATCH'
+              AND objek EQ @<fs_print1>-cuobj_bm.
+
+          <fs_print1>-atwrt1 = lv_atwrt1 .
+          <fs_print1>-atwrt2 = lv_atwrt2.
+          <fs_print1>-atwrt3 = lv_atwrt3 .
+*------------add by yakir at 05.02.2021 22:58:48------end--*
+
+        ENDLOOP.
+        MOVE-CORRESPONDING lt_print1 TO lt_sf.
+      ENDIF.
+
+
+      SELECT zzbcrl_hu~hupal,
+             zzbcrl_hu~paltyp,
+             a~matnr,
+             a~meins,
+             a~menge,
+             a~maktx,
+             a~mecap
+      FROM zzbcrl_hu
+      JOIN zewmbarcode AS a ON zzbcrl_hu~hubox EQ a~hubox
+      WHERE zzbcrl_hu~hupal = @ls_in-hupal
+      INTO TABLE @DATA(lt_print2).
+
+      IF sy-subrc = 0.
+        MOVE-CORRESPONDING lt_print2[ 1 ] TO ls_out.
+
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+          EXPORTING
+            input  = ls_out-hupal
+          IMPORTING
+            output = ls_out-hupal.
+        ls_out-boxnu = lines( lt_print2 ).
+
+        LOOP AT lt_print2 INTO DATA(ls_print2).
+          ls_out-to_nu = ls_out-to_nu + ls_print2-menge.
+*------------add by yakir at 04.02.2021 20:45:33------begin--*
+          ls_out-prt_qty = ls_out-to_nu.
+*------------add by yakir at 04.02.2021 20:45:33------end--*
+        ENDLOOP.
+
+      ENDIF.
+
+      SELECT SINGLE parva
+         FROM usr05
+         WHERE bname = @ls_in-ernam
+           AND parid = 'ZBARCODE_ID'
+         INTO @DATA(lv_parva).
+
+      IF sy-subrc <> 0
+      OR ( lv_parva <> '80x60'
+      AND lv_parva <> '70x50' ).
+        CLEAR gs_msg.
+        gs_msg-msg_type = 'E'.
+        gs_msg-msg_content = '托盘HU' && ls_in-hupal && '打印失败，请检查用户参数打印规格'.
+        APPEND gs_msg TO gt_msg.
+      ELSE.
+        SELECT SINGLE spld
+        FROM usr01
+        WHERE bname = @ls_in-ernam
+        INTO @DATA(lv_spld).
+        IF sy-subrc = 0.
+          ls_composer_param-tddest = lv_spld.
+          IF   lv_parva = '80x60'.
+            le_tdsfname1 = 'ZEWMF009'.
+            le_tdsfname2 = 'ZEWMF006'.
+          ELSEIF lv_parva = '70x50'.
+            le_tdsfname1 = 'ZEWMF008'.
+            le_tdsfname2 = 'ZEWMF007'.
+          ENDIF.
+
+          ls_composer_param-tdnewid = 'X'.
+          ls_composer_param-tdimmed  = 'X'.
+          ls_composer_param-tddelete = 'X'.
+          ls_composer_param-tdfinal = 'X'.
+          ls_composer_param-tdiexit = 'X'.
+
+          control-no_dialog = 'X'.
+          control-no_open   = 'X'.
+          control-no_close   = 'X'.
+
+          CALL FUNCTION 'SSF_OPEN' ""只有第一页需要SSF OPEN其他页不用
+            EXPORTING
+              user_settings      = ''
+              output_options     = ls_composer_param
+              control_parameters = control
+            IMPORTING
+              job_output_options = jobout
+            EXCEPTIONS
+              formatting_error   = 1
+              internal_error     = 2
+              send_error         = 3
+              user_canceled      = 4
+              OTHERS             = 5.
+
+          CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+            EXPORTING
+              formname           = le_tdsfname1
+            IMPORTING
+              fm_name            = fn_name
+            EXCEPTIONS
+              no_form            = 1
+              no_function_module = 2
+              OTHERS             = 3.
+
+          ""标签明细
+
+          CALL FUNCTION fn_name
+            EXPORTING
+              control_parameters = control
+              output_options     = ls_composer_param
+            TABLES
+              gt_data            = lt_sf
+            EXCEPTIONS
+              formattint_error   = 1
+              internal_error     = 2
+              send_error         = 3
+              user_canceled      = 4
+              OTHERS             = 5.
+          IF sy-subrc <> 0.
+            lv_content = '托盘明细打印失败'
+                         && sy-subrc
+                         && '. '.
+
+          ENDIF.
+
+
+          CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+            EXPORTING
+              formname           = le_tdsfname2
+            IMPORTING
+              fm_name            = fn_name
+            EXCEPTIONS
+              no_form            = 1
+              no_function_module = 2
+              OTHERS             = 3.
+
+          ""标签
+          CALL FUNCTION fn_name
+            EXPORTING
+              control_parameters = control
+              output_options     = ls_composer_param
+              gs_out             = ls_out
+            EXCEPTIONS
+              formattint_error   = 1
+              internal_error     = 2
+              send_error         = 3
+              user_canceled      = 4
+              OTHERS             = 5.
+          IF sy-subrc <> 0.
+            lv_content = lv_content
+                        && '托盘标签打印失败'
+                        && sy-subrc
+                        && '. '.
+
+          ENDIF.
+*
+
+          CALL FUNCTION 'SSF_CLOSE' ""SSF_CLOSE同理，只有最后一页要CLOSE 不能放循环里面
+            IMPORTING
+              job_output_info  = ls_return
+            EXCEPTIONS
+              formatting_error = 1
+              internal_error   = 2
+              send_error       = 3
+              OTHERS           = 4.
+
+          IF lv_content IS NOT INITIAL.
+            CLEAR gs_msg.
+            gs_msg-msg_type = 'E'.
+            gs_msg-msg_content = lv_content.
+            APPEND gs_msg TO gt_msg.
+          ELSE.
+            CLEAR gs_msg.
+            gs_msg-msg_type = 'S'.
+            gs_msg-msg_content = '打印成功'.
+            APPEND gs_msg TO gt_msg.
+          ENDIF.
+
+
+        ELSE.
+          CLEAR gs_msg.
+          gs_msg-msg_type = 'E'.
+          gs_msg-msg_content = '托盘HU' && ls_in-hupal && '打印失败，用户未设置打印设备'.
+          APPEND gs_msg TO gt_msg.
+        ENDIF.
+      ENDIF.
+
+    ENDIF.
+
+
+    CLEAR ev_json.
+    ev_json = /ui2/cl_json=>serialize( gt_msg[] ).
+    DATA(lv_json1) = ev_json.
+
+    IF lt_hupal IS NOT INITIAL.
+
+      CLEAR ev_json.
+      ev_json = /ui2/cl_json=>serialize( lt_hupal[] ).
+      DATA(lv_json3) = ev_json.
+    ENDIF.
+    IF lv_json2 IS NOT INITIAL .
+      CONCATENATE '{"MESSAGE":' lv_json1 ',"LT_ERROR":'   lv_json2    '}' INTO ev_json.
+    ENDIF.
+    IF lv_json3 IS NOT INITIAL .
+      CONCATENATE '{"MESSAGE":' lv_json1 ',"LT_HUPAL":'   lv_json3 '}' INTO ev_json.
+    ENDIF.
+    CLEAR:lv_json1,lv_json2,lv_json3.
+  ENDMETHOD.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758

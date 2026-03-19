@@ -1,0 +1,64 @@
+FUNCTION ZFM_SCM_GET_HU_JSON .
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     REFERENCE(IV_JSON) TYPE  STRING
+*"  EXPORTING
+*"     REFERENCE(EV_JSON) TYPE  STRING
+*"----------------------------------------------------------------------
+
+  DATA lv_token TYPE string.
+  DATA lv_url TYPE string.
+
+  CALL FUNCTION 'ZFM_SCM_TOKEN'
+    IMPORTING
+      ev_token = lv_token
+      ev_url   = lv_url.
+
+  CHECK lv_token IS NOT INITIAL.
+
+  lv_url = lv_url && 'api/v1/pdaOrder/queryOrderInfo'.
+
+* 调用接口.
+
+  CALL METHOD cl_http_client=>create_by_url
+    EXPORTING
+      url    = lv_url
+    IMPORTING
+      client = DATA(lo_http_client).
+
+* 设置访问参数
+
+
+  lo_http_client->request->set_method( 'POST').
+  lo_http_client->request->set_header_field( name = 'Content-Type' value = 'application/json' ).
+  lo_http_client->request->set_header_field( name = 'Authorization' value = lv_token ).
+  lo_http_client->request->set_cdata( data = iv_json ).
+
+* 发送请求，获取token
+  CALL METHOD lo_http_client->send
+    EXCEPTIONS
+      http_communication_failure = 1
+      http_invalid_state         = 2.
+
+* Get response from HTTP
+  CALL METHOD lo_http_client->receive
+    EXCEPTIONS
+      http_communication_failure = 1
+      http_invalid_state         = 2
+      http_processing_failed     = 3.
+
+  IF sy-subrc NE 0.
+    lo_http_client->get_last_error( IMPORTING code = DATA(lv_error_code) message = DATA(lv_message) ).
+  ENDIF.
+
+* 获取状态以及response
+  lo_http_client->response->get_status( IMPORTING code = DATA(lv_code) reason = DATA(lv_reason) ).
+  DATA(lv_cdata) = lo_http_client->response->get_cdata( ).
+
+  ev_json = lv_cdata.
+
+ENDFUNCTION.
+
+----------------------------------------------------------------------------------
+Extracted by Mass Download version 1.5.5 - E.G.Mellodew. 1998-2026. Sap Release 758
